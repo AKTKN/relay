@@ -8,11 +8,14 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
+import pytest
 import numpy as np
 import pathlib
 import sinter
 import stim
 import tempfile
+import pandas as pd
+import json
 
 from relay_bp.stim import (
     SinterDecoder_RelayBP,
@@ -237,3 +240,101 @@ def test_filter_detectors_by_basis():
     z_check_matrices = CheckMatrices.from_dem(z_dem)
 
     assert z_check_matrices.check_matrix.shape == (36, 288)
+
+
+# def test_get_iterations_from_sinter_tasks():
+#     """Test getting iteration counts from sinter tasks"""
+#     circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
+#     tasks = [sinter.Task(circuit=circuit)]
+
+#     decoder_params = dict(
+#     gamma0=0.1,
+#     pre_iter=80,
+#     num_sets=300,
+#     set_max_iter=60,
+#     gamma_dist_interval=[-0.24, 0.66],
+#     stop_nconv=5,
+#     get_detail=True
+#     )
+#     decoders = sinter_decoders(
+#         **decoder_params
+#     )
+
+#     samples = sinter.collect(
+#         num_workers=2,
+#         max_shots=1_00,
+#         tasks=tasks,
+#         decoders=["relay-bp"],
+#         custom_decoders=decoders,
+#     )
+
+#     assert samples[0].decoder == "relay-bp"
+#     assert samples[0].errors <= 10
+#     assert samples[0].shots == 100
+
+def test_sinter_saves_results_to_csv():
+    """Test sinter.collect saves the result including iterations"""
+    circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
+    tasks = [sinter.Task(circuit=circuit)]
+
+    # Set directory and filepath for saving test results
+    output_dir = pathlib.Path("tests/test_outputs")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_output_path = output_dir / "sinter_results_test.csv"
+
+    if csv_output_path.exists():
+        csv_output_path.unlink()  # Remove existing file to ensure a fresh test
+
+    decoder_params = dict(
+        gamma0=0.1,
+        pre_iter=30,
+        num_sets=5,
+        set_max_iter=20,
+        gamma_dist_interval=[-0.24, 0.66],
+        stop_nconv=1,
+        get_detail=True
+        )
+    decoders = sinter_decoders(
+        **decoder_params
+    )
+
+    sinter.collect(
+        num_workers=2,
+        max_shots=1_00,
+        tasks=tasks,
+        decoders=["relay-bp"],
+        custom_decoders=decoders,
+        save_resume_filepath=csv_output_path,
+    )
+
+    assert csv_output_path.exists(), "CSV output file was not created."
+    df = pd.read_csv(csv_output_path)
+
+    assert "custom_counts" in df.columns
+
+    for index, row in df.iterrows():
+        custom_counts_str = row["custom_counts"]
+        assert isinstance(custom_counts_str, str), "custom_counts is not a string."
+
+        counts_dict = json.loads(custom_counts_str)
+        assert isinstance(counts_dict, dict)
+
+        key = list(counts_dict.keys())[0]
+        value = counts_dict[key]
+        assert isinstance(key, str)
+        assert isinstance(value, int)
+
+        assert key.startswith("signed_iter_")
+        iteration_str = key.split("_")[-1]
+        try:
+            iteration_count = int(iteration_str)
+        except ValueError:
+            pytest.fail(f"Could not convert '{iteration_str} to an integer' ")
+
+        assert isinstance(iteration_count, int) 
+        assert isinstance(value, int)
+    
+
+    
+
+

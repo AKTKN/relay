@@ -21,6 +21,8 @@ import relay_bp
 
 from .check_matrices import CheckMatrices
 
+from typing import TYPE_CHECKING, Optional
+
 
 class SinterCompiledDecoder_BP(CompiledDecoder):
     def __init__(
@@ -30,19 +32,20 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         parallel: bool = False,
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
+        get_detail: bool = False,
     ):
         self.observable_decoder = observable_decoder
         self.parallel = parallel
         self.check_matrices = check_matrices
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
+        self.get_detail = get_detail
 
     def decode_shots_bit_packed(
         self,
         *,
         bit_packed_detection_event_data: "np.ndarray",
     ) -> "np.ndarray":
-
         syndromes = np.unpackbits(
             bit_packed_detection_event_data, bitorder="little", axis=1
         ).astype(np.uint8)
@@ -50,18 +53,32 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         if self.check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + self.check_matrices.syndrome_bias) % 2
 
-        predictions = self.observable_decoder.decode_observables_batch(
-            syndromes,
-            parallel=self.parallel,
-            progress_bar=self.show_progress,
-            leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
-        )
+        if self.get_detail:
+            results = self.observable_decoder.decode_observables_detailed_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
+            predictions = np.array([res.observables for res in results])
+            iterations = np.array([res.iterations for res in results])
+
+        else:
+            predictions = self.observable_decoder.decode_observables_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
 
         if self.check_matrices.observables_bias is not None:
             predictions = (predictions + self.check_matrices.observables_bias) % 2
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
-        return outputs
+        if self.get_detail:
+            return outputs, iterations
+        else:
+            return outputs
 
 
 class SinterDecoder_BaseBP(Decoder):
@@ -73,6 +90,7 @@ class SinterDecoder_BaseBP(Decoder):
         threshold: float = 0.0,
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
+        get_detail_result: bool = False,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.parallel = parallel
@@ -81,6 +99,7 @@ class SinterDecoder_BaseBP(Decoder):
         self.threshold = threshold
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
+        self.get_detail_result = get_detail_result
 
     def build_observable_decoder(
         self, dem: stim.DetectorErrorModel
@@ -103,6 +122,7 @@ class SinterDecoder_BaseBP(Decoder):
             parallel=self.parallel,
             show_progress=self.show_progress,
             leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            get_detail=self.get_detail_result,
         )
 
     def decode_via_files(
@@ -115,6 +135,7 @@ class SinterDecoder_BaseBP(Decoder):
         dets_b8_in_path: pathlib.Path,
         obs_predictions_b8_out_path: pathlib.Path,
         tmp_dir: pathlib.Path,
+        iterations_out_path: Optional[pathlib.Path] = None, 
     ) -> None:
 
         dem = stim.DetectorErrorModel.from_file(dem_path)
@@ -137,12 +158,30 @@ class SinterDecoder_BaseBP(Decoder):
         if check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + check_matrices.syndrome_bias) % 2
 
-        predictions = observable_decoder.decode_observables_batch(
-            syndromes,
-            parallel=self.parallel,
-            progress_bar=self.show_progress,
-            leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
-        )
+        if self.get_detail_result:
+            results = observable_decoder.decode_observables_detailed_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
+            predictions = np.array([res.observables for res in results])
+            iterations = np.array([res.iterations for res in results])
+
+            if iterations_out_path is not None:
+                with open(iterations_out_path, 'wb') as f:
+                    iterations.tofile(f)
+                print(f"Debug: iterations saved to {iterations_out_path}")
+            else:
+                raise ValueError("iterations_out_path must be provided when get_detail_result is True")
+
+        else:
+            predictions = observable_decoder.decode_observables_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
 
         if check_matrices.observables_bias is not None:
             predictions = (predictions + check_matrices.observables_bias) % 2
@@ -172,6 +211,7 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
+        get_detail: bool = False    # if True, return detailed decoding info
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.alpha = alpha
@@ -184,11 +224,13 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         self.stop_nconv = stop_nconv
         self.stopping_criterion = stopping_criterion
         self.logging = logging
+        self.get_detail = get_detail
         super().__init__(
             parallel=parallel,
             decomposed_hyperedges=decomposed_hyperedges,
             prune_decided_errors=prune_decided_errors,
             threshold=threshold,
+            get_detail_result=get_detail
         )
 
     def build_observable_decoder(
