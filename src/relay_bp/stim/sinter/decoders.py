@@ -62,6 +62,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             )
             predictions = np.array([res.observables for res in results])
             iterations = np.array([res.iterations for res in results])
+            coverage = np.array([res.converged for res in results])
+
+            iterations[~coverage] = 9999
+            
 
         else:
             predictions = self.observable_decoder.decode_observables_batch(
