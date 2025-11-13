@@ -380,7 +380,7 @@ def test_sinter_harmonized_bp_decoder_integration(decoder_params, description):
             circuit=stim.Circuit.generated(
                 rounds=7,
                 distance=7,
-                after_clifford_depolarization=0.001,
+                after_clifford_depoarization=0.001,
                 code_task=f"surface_code:rotated_memory_x",
             ),
             json_metadata={"p": 0.01, "d": 7},
