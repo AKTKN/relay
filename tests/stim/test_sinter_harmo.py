@@ -6,6 +6,9 @@ import pathlib
 import matplotlib.pyplot as plt
 import sys 
 import os
+test_data_path = pathlib.Path(__file__).parent.parent
+assert test_data_path.exists()
+sys.path.append(str(test_data_path))
 from testdata import (
     get_test_circuit,
     get_all_test_circuits,
@@ -152,7 +155,7 @@ def test_sinter_harmonized_bp_on_bbcode():
         csv_output_path.unlink()  # Ensure a fresh test
 
     samples = sinter.collect(
-        num_workers=4,  # Use 1 worker for easier debugging if bliss fails
+        num_workers=88, 
         tasks=generate_sinter_tasks(decoders, decoder_params),
         decoders=["harmonized-bp", "relay-bp"],
         custom_decoders=decoders,
@@ -178,6 +181,7 @@ def test_sinter_harmonized_bp_on_bbcode():
     ax.set_ylabel("Logical Error Probability (per round/qubit)")
     ax.set_xlabel("Physical Error Rate")
     ax.legend()
+    plt.savefig("sinter_harmonized_bp_on_bbcode.png")
 
     plt.show()
 
