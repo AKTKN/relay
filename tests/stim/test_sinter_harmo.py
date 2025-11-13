@@ -116,7 +116,7 @@ def generate_sinter_tasks(decoders, decoder_params):
                             "xyz": XYZ,
                             "decoder_params": decoder_params,
                         },
-                        collection_options=sinter.CollectionOptions(max_shots=1000)
+                        collection_options=sinter.CollectionOptions(max_shots=100000)
                     )
 
     
@@ -157,10 +157,10 @@ def test_sinter_harmonized_bp_on_bbcode():
     samples = sinter.collect(
         num_workers=88, 
         tasks=generate_sinter_tasks(decoders, decoder_params),
-        decoders=["harmonized-bp", "relay-bp"],
+        decoders=decoders,
         custom_decoders=decoders,
         save_resume_filepath=csv_output_path,
-        print_progress=True,  
+        print_progress=False,  
     )
 
 
