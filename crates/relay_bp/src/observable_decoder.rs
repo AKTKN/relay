@@ -8,7 +8,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use crate::decoder::{Bit, DecodeResult, Decoder, DecoderRunner, Mod2Mul, SparseBitMatrix};
+use crate::{decoder::{Bit, DecodeResult, Decoder, DecoderRunner, Mod2Mul, SparseBitMatrix}};
 use serde::{Deserialize, Serialize};
 
 use indicatif::{ParallelProgressIterator, ProgressFinish, ProgressIterator, ProgressStyle};
@@ -430,6 +430,8 @@ pub struct TrueDecodingResults {
     pub better_decoding_quality_error: bool,
     pub worse_decoding_quality_error: bool,
 }
+
+
 
 #[cfg(test)]
 mod tests {

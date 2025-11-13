@@ -16,11 +16,19 @@ use relay_bp::observable_decoder::{
     ObservableDecodeResult as ObservableDecodeResultInner, ObservableDecoder,
     ObservableDecoderRunner as ObservableDecoderRunnerInner,
 };
+use relay_bp::ensemble_decoder::{EnsembleDecoder, SelectionStrategy};
+use relay_bp::bp::min_sum::MinSumDecoderConfig;
+use relay_bp::bp::relay::{RelayDecoder, RelayDecoderConfig, StoppingCriterion};
+use relay_bp::decoder::{Decoder, AutomorphismWrapperDecoder, SparseBitMatrix};
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use ndarray::Array1;
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult};
+use pyo3::types::PyList;
 use std::mem;
+use rand::Rng;
+use sprs::CsMat;
 
 #[pyclass(module = "observable_decoder")]
 pub struct ObservableDecodeResult {
@@ -117,6 +125,190 @@ impl ObservableDecoderRunner {
         };
         Ok(Self { inner })
     }
+
+
+
+    // Factory method to create an ObservableDecoderRunner with an EnsembleDecoder inside
+    #[staticmethod]
+    #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
+        set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
+        stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), 
+        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=0))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_ensemble_decoder(
+        py: Python<'_>,
+        ensemble_size: usize,
+        check_matrix: &Bound<'_, PyAny>,
+        observable_matrix: &Bound<'_, PyAny>,
+        error_priors: PyReadonlyArray1<f64>,
+        alpha: Option<f64>,
+        alpha_iteration_scaling_factor: f64,
+        gamma0: Option<f64>,
+        data_scale_value: Option<f64>,
+        max_data_value: Option<f64>,
+        pre_iter: usize,
+        num_sets: usize,
+        set_max_iter: usize,
+        gamma_dist_interval: (f64, f64),
+        explicit_gammas: Option<PyReadonlyArray2<f64>>,
+        stop_nconv: usize,
+        stopping_criterion: String,
+        logging: bool,
+        selection_strategy: String,
+        perturbation_min: f64,
+        perturbation_max: f64,
+        col_permutations: Option<&Bound<'_, PyAny>>,
+        row_permutations: Option<&Bound<'_, PyAny>>,
+        seed: u64,
+    ) -> PyResult<Self> {
+        // 1. Setyp parameters for child decoders
+        let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
+        let error_priors_owned = error_priors.as_array().to_owned();
+
+        let check_matrix_arc = Arc::new(get_sprs_bit_matrix_from_python(py, check_matrix)?);
+        let obs_matrix_arc = Arc::new(get_sprs_bit_matrix_from_python(py, observable_matrix)?);
+
+        // Convert permutation matrix from Python to Rust
+        let col_perms_arc: Option<Vec<Arc<SparseBitMatrix>>> = col_permutations
+            .map(|any| {
+                any.downcast::<PyList>()?
+                    .iter()
+                    .map(|p| get_sprs_bit_matrix_from_python(py, &p).map(Arc::new))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
+
+        let row_perms_arc: Option<Vec<Arc<SparseBitMatrix>>> = row_permutations
+            .map(|any| {
+                any.downcast::<PyList>()?
+                    .iter()
+                    .map(|p| get_sprs_bit_matrix_from_python(py, &p).map(Arc::new))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
+
+        let stopping_criterion_template = match stopping_criterion.as_str() {
+            "pre_iter" => StoppingCriterion::PreIter,
+            "nconv" => StoppingCriterion::NConv { stop_after: stop_nconv },
+            "all" => StoppingCriterion::All,
+            _ => StoppingCriterion::default(),
+        };
+
+        let relay_config_templete = RelayDecoderConfig {
+            pre_iter, num_sets, set_max_iter, gamma_dist_interval,
+            explicit_gammas: explicit_gammas.map(|arr| arr.as_array().to_owned()),
+            stopping_criterion: stopping_criterion_template, logging, seed,
+        };   
+
+        // Perturb error priors 
+        // Initnalize random number generator
+        let mut rng = rand::thread_rng();
+
+        // Create child decoders 
+        for i in 0..ensemble_size {
+            // Generate a random perturbation strongness within the specified range
+            let alpha_perturb = if perturbation_min < perturbation_max {
+                rng.gen_range(perturbation_min..perturbation_max)
+            } else {
+                0.0
+            };
+
+            // Apply the perturbation to the error priors
+            let perturbed_priors = if alpha_perturb > 0.0 {
+                let mut new_priors = error_priors_owned.clone();
+                for p in new_priors.iter_mut(){
+                    let factor = rng.gen_range((1.0 - alpha_perturb)..=(1.0 + alpha_perturb));
+                    *p = (*p * factor).clamp(1e-15, 1.0 - 1e-15);
+                }
+                new_priors
+            } else {
+                error_priors_owned.clone()
+            };
+
+            // Apply permutations
+            let (final_check_matrix, final_priors, col_perm, row_perm) =
+                if let (Some(cp), Some(rp)) = (&col_perms_arc, &row_perms_arc) {
+                    let current_col_perm = cp.get(i).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Not enough column permutations provided"))?.clone();
+                    let current_row_perm = rp.get(i).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Not enough row permutations provided"))?.clone();
+
+                    // H' = H * A
+                    let transformed_h = Arc::new(&*check_matrix_arc * &*current_col_perm);
+
+                    // p' = p * A (手動で置換)
+                    let mut transformed_priors = Array1::zeros(perturbed_priors.len());
+                    for (j, &val) in perturbed_priors.iter().enumerate() {
+                        if let Some(k) = current_col_perm.outer_view(j).and_then(|col| col.indices().get(0).copied()) {
+                            transformed_priors[k] = val;
+                        }
+                    }
+                    (transformed_h, transformed_priors, current_col_perm, current_row_perm)
+                } else {
+                    // 自己同型を使わない場合は、恒等置換を生成
+                    let num_vars = check_matrix_arc.cols();
+                    let num_checks = check_matrix_arc.rows();
+                    (check_matrix_arc.clone(), perturbed_priors, Arc::new(CsMat::eye(num_vars)), Arc::new(CsMat::eye(num_checks)))
+                };
+
+            // Create MinSumDecoderConfig with perturbed priors
+            let min_sum_config = MinSumDecoderConfig {
+                error_priors: final_priors, 
+                max_iter: pre_iter,
+                alpha,
+                alpha_iteration_scaling_factor,
+                gamma0,
+                data_scale_value,
+                max_data_value,
+                int_bits: None,
+                frac_bits: None,
+            };
+
+            // Create RelayDecoderConfig
+            let mut relay_config = relay_config_templete.clone();
+            relay_config.seed = seed + i as u64;
+
+            // Create child decoder
+            let relay_decoder = Box::new(RelayDecoder::<f64>::new(
+                final_check_matrix, 
+                Arc::new(min_sum_config),
+                Arc::new(relay_config),
+            ));
+
+            let wrapped_decoder = Box::new(AutomorphismWrapperDecoder::new(
+                relay_decoder,
+                col_perm,
+                row_perm,
+            ));
+            child_decoders.push(wrapped_decoder);
+        }
+
+        // 3. EnsembleDecoderを生成
+        let strategy = match selection_strategy.to_lowercase().as_str() {
+            "most-likely" | "mostlikely" => SelectionStrategy::MostLikely,
+            "majority-vote" | "majorityvote" => SelectionStrategy::MajorityVote,
+            _ => SelectionStrategy::MostLikely,
+        };
+
+        let original_log_priors = error_priors_owned.mapv(|p| (p / (1.0 - p)).ln());
+        let original_log_priors_arc = Arc::new(original_log_priors);
+
+        let ensemble_decoder = EnsembleDecoder::new(
+            child_decoders,
+            strategy,
+            Some(original_log_priors_arc),
+            Some(obs_matrix_arc.clone()),
+        );
+
+        // 4. 生成したEnsembleDecoderを使い、自分自身(ObservableDecoderRunner)のインスタンスを生成して返す
+        let inner: relay_bp::observable_decoder::ObservableDecoderRunner<'_> = unsafe {
+            mem::transmute(ObservableDecoderRunnerInner::new(
+                Box::new(ensemble_decoder),
+                obs_matrix_arc,
+                true, // include_decode_result
+            ))
+        };
+        Ok(Self { inner })
+    }
+
 
     pub fn decode<'py>(
         &mut self,

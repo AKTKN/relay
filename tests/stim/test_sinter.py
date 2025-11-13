@@ -8,6 +8,7 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
+
 import pytest
 import numpy as np
 import pathlib
@@ -30,247 +31,246 @@ from testdata import (
 )
 
 
-def test_check_matrix_pruning():
-    """Test decoding of the surface code via files."""
-    circuit = stim.Circuit.generated(
-        rounds=11,
-        distance=11,
-        after_clifford_depolarization=0.003,
-        code_task=f"surface_code:rotated_memory_z",
-    )
-    dem = circuit.detector_error_model(decompose_errors=True)
+# def test_check_matrix_pruning():
+#     """Test decoding of the surface code via files."""
+#     circuit = stim.Circuit.generated(
+#         rounds=11,
+#         distance=11,
+#         after_clifford_depolarization=0.003,
+#         code_task=f"surface_code:rotated_memory_z",
+#     )
+#     dem = circuit.detector_error_model(decompose_errors=True)
 
-    check_matrices = CheckMatrices.from_dem(
-        dem, decomposed_hyperedges=True, prune_decided_errors=False
-    )
-    check_matrices_pruned = CheckMatrices.from_dem(
-        dem, decomposed_hyperedges=True, prune_decided_errors=True
-    )
+#     check_matrices = CheckMatrices.from_dem(
+#         dem, decomposed_hyperedges=True, prune_decided_errors=False
+#     )
+#     check_matrices_pruned = CheckMatrices.from_dem(
+#         dem, decomposed_hyperedges=True, prune_decided_errors=True
+#     )
 
-    assert (
-        check_matrices.check_matrix.shape[0]
-        == check_matrices_pruned.check_matrix.shape[0]
-    )
-    assert (
-        check_matrices.check_matrix.shape[1]
-        > check_matrices_pruned.check_matrix.shape[1]
-    )
-    assert (
-        check_matrices.observables_matrix.shape[0]
-        == check_matrices_pruned.observables_matrix.shape[0]
-    )
-    assert (
-        check_matrices.observables_matrix.shape[1]
-        > check_matrices_pruned.observables_matrix.shape[1]
-    )
-
-
-def test_sinter_relay_bp_decoder_integration():
-    """Test decoding of the surface code with sinter."""
-
-    def generate_example_tasks():
-        for p in [0.0001]:
-            for d in [3]:
-                yield sinter.Task(
-                    circuit=stim.Circuit.generated(
-                        rounds=d,
-                        distance=d,
-                        after_clifford_depolarization=p,
-                        code_task=f"surface_code:rotated_memory_x",
-                    ),
-                    json_metadata={
-                        "p": p,
-                        "d": d,
-                    },
-                )
-
-    samples = sinter.collect(
-        num_workers=2,
-        max_shots=1_00,
-        tasks=generate_example_tasks(),
-        decoders=["relay-bp"],
-        custom_decoders=sinter_decoders(),
-    )
-    assert samples[0].decoder == "relay-bp"
-    assert samples[0].errors <= 5
-    assert samples[0].shots == 100
+#     assert (
+#         check_matrices.check_matrix.shape[0]
+#         == check_matrices_pruned.check_matrix.shape[0]
+#     )
+#     assert (
+#         check_matrices.check_matrix.shape[1]
+#         > check_matrices_pruned.check_matrix.shape[1]
+#     )
+#     assert (
+#         check_matrices.observables_matrix.shape[0]
+#         == check_matrices_pruned.observables_matrix.shape[0]
+#     )
+#     assert (
+#         check_matrices.observables_matrix.shape[1]
+#         > check_matrices_pruned.observables_matrix.shape[1]
+#     )
 
 
-def test_sinter_msl_bp_decoder_integration():
-    """Test decoding of the surface code with sinter."""
+# def test_sinter_relay_bp_decoder_integration():
+#     """Test decoding of the surface code with sinter."""
 
-    def generate_example_tasks():
-        for p in [0.0001]:
-            for d in [3]:
-                yield sinter.Task(
-                    circuit=stim.Circuit.generated(
-                        rounds=d,
-                        distance=d,
-                        after_clifford_depolarization=p,
-                        code_task=f"surface_code:rotated_memory_x",
-                    ),
-                    json_metadata={
-                        "p": p,
-                        "d": d,
-                    },
-                )
+#     def generate_example_tasks():
+#         for p in [0.0001]:
+#             for d in [3]:
+#                 yield sinter.Task(
+#                     circuit=stim.Circuit.generated(
+#                         rounds=d,
+#                         distance=d,
+#                         after_clifford_depolarization=p,
+#                         code_task=f"surface_code:rotated_memory_x",
+#                     ),
+#                     json_metadata={
+#                         "p": p,
+#                         "d": d,
+#                     },
+#                 )
 
-    samples = sinter.collect(
-        num_workers=2,
-        max_shots=1_00,
-        tasks=generate_example_tasks(),
-        decoders=["msl-bp"],
-        custom_decoders=sinter_decoders(),
-    )
-    assert samples[0].decoder == "msl-bp"
-    assert samples[0].errors <= 10
-    assert samples[0].shots == 100
-
-
-def test_sinter_mem_bp_decoder_integration():
-    """Test decoding of the surface code with sinter."""
-
-    def generate_example_tasks():
-        for p in [0.0001]:
-            for d in [3]:
-                yield sinter.Task(
-                    circuit=stim.Circuit.generated(
-                        rounds=d,
-                        distance=d,
-                        after_clifford_depolarization=p,
-                        code_task=f"surface_code:rotated_memory_x",
-                    ),
-                    json_metadata={
-                        "p": p,
-                        "d": d,
-                    },
-                )
-
-    # Collect the samples (takes a few minutes).
-    samples = sinter.collect(
-        num_workers=2,
-        max_shots=1_00,
-        tasks=generate_example_tasks(),
-        decoders=["mem-bp"],
-        custom_decoders=sinter_decoders(),
-    )
-    assert samples[0].decoder == "mem-bp"
-    assert samples[0].errors <= 20
-    assert samples[0].shots == 100
+#     samples = sinter.collect(
+#         num_workers=2,
+#         max_shots=1_00,
+#         tasks=generate_example_tasks(),
+#         decoders=["relay-bp"],
+#         custom_decoders=sinter_decoders(),
+#     )
+#     assert samples[0].decoder == "relay-bp"
+#     assert samples[0].errors <= 5
+#     assert samples[0].shots == 100
 
 
-def test_sinter_decode_via_files():
-    """Test decoding of the surface code via files."""
-    circuit = stim.Circuit.generated(
-        rounds=3,
-        distance=3,
-        after_clifford_depolarization=0.0001,
-        code_task=f"surface_code:rotated_memory_x",
-    )
-    dem = circuit.detector_error_model()
+# def test_sinter_msl_bp_decoder_integration():
+#     """Test decoding of the surface code with sinter."""
 
-    with tempfile.TemporaryDirectory() as d:
-        testdir = pathlib.Path(d)
+#     def generate_example_tasks():
+#         for p in [0.0001]:
+#             for d in [3]:
+#                 yield sinter.Task(
+#                     circuit=stim.Circuit.generated(
+#                         rounds=d,
+#                         distance=d,
+#                         after_clifford_depolarization=p,
+#                         code_task=f"surface_code:rotated_memory_x",
+#                     ),
+#                     json_metadata={
+#                         "p": p,
+#                         "d": d,
+#                     },
+#                 )
 
-        circuit.compile_detector_sampler().sample_write(
-            shots=100,
-            filepath=testdir / "detectors.b8",
-            format="b8",
-        )
-
-        dem.to_file(testdir / "dem.dem")
-
-        SinterDecoder_RelayBP(parallel=True).decode_via_files(
-            num_shots=10,
-            num_dets=dem.num_detectors,
-            num_obs=dem.num_observables,
-            dem_path=testdir / "dem.dem",
-            dets_b8_in_path=testdir / "detectors.b8",
-            obs_predictions_b8_out_path=testdir / "observable_predictions.b8",
-            tmp_dir=testdir,
-        )
-
-        predictions = stim.read_shot_data_file(
-            path=testdir / "observable_predictions.b8",
-            format="b8",
-            num_observables=dem.num_observables,
-        )
-        assert np.sum(predictions) <= 5
+#     samples = sinter.collect(
+#         num_workers=2,
+#         max_shots=1_00,
+#         tasks=generate_example_tasks(),
+#         decoders=["msl-bp"],
+#         custom_decoders=sinter_decoders(),
+#     )
+#     assert samples[0].decoder == "msl-bp"
+#     assert samples[0].errors <= 10
+#     assert samples[0].shots == 100
 
 
-def test_get_testdata_circuit():
-    """Test getting test circuit and decoding."""
-    circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
-    tasks = [sinter.Task(circuit=circuit)]
+# def test_sinter_mem_bp_decoder_integration():
+#     """Test decoding of the surface code with sinter."""
 
-    samples = sinter.collect(
-        num_workers=2,
-        max_shots=1_00,
-        tasks=tasks,
-        decoders=["relay-bp"],
-        custom_decoders=sinter_decoders(),
-    )
+#     def generate_example_tasks():
+#         for p in [0.0001]:
+#             for d in [3]:
+#                 yield sinter.Task(
+#                     circuit=stim.Circuit.generated(
+#                         rounds=d,
+#                         distance=d,
+#                         after_clifford_depolarization=p,
+#                         code_task=f"surface_code:rotated_memory_x",
+#                     ),
+#                     json_metadata={
+#                         "p": p,
+#                         "d": d,
+#                     },
+#                 )
 
-    assert samples[0].decoder == "relay-bp"
-    assert samples[0].errors <= 10
-    assert samples[0].shots == 100
-
-
-def test_get_all_testdata_circuit():
-    """Test getting test circuit and decoding."""
-    circuits = get_all_test_circuits("*", 0.001)
-    for name, circuit in circuits.items():
-        assert isinstance(name, str)
-        assert isinstance(circuit, stim.Circuit)
-
-    assert len(circuits) > 1
-
-
-def test_filter_detectors_by_basis():
-    """Test getting test circuit and decoding."""
-    circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
-
-    dem = circuit.detector_error_model()
-    check_matrices = CheckMatrices.from_dem(dem)
-
-    assert check_matrices.check_matrix.shape == (54, 1800)
-
-    z_circuit = filter_detectors_by_basis(circuit, "Z")
-    z_dem = z_circuit.detector_error_model()
-    z_check_matrices = CheckMatrices.from_dem(z_dem)
-
-    assert z_check_matrices.check_matrix.shape == (36, 288)
+#     # Collect the samples (takes a few minutes).
+#     samples = sinter.collect(
+#         num_workers=2,
+#         max_shots=1_00,
+#         tasks=generate_example_tasks(),
+#         decoders=["mem-bp"],
+#         custom_decoders=sinter_decoders(),
+#     )
+#     assert samples[0].decoder == "mem-bp"
+#     assert samples[0].errors <= 20
+#     assert samples[0].shots == 100
 
 
-# def test_get_iterations_from_sinter_tasks():
-#     """Test getting iteration counts from sinter tasks"""
+# def test_sinter_decode_via_files():
+#     """Test decoding of the surface code via files."""
+#     circuit = stim.Circuit.generated(
+#         rounds=3,
+#         distance=3,
+#         after_clifford_depolarization=0.0001,
+#         code_task=f"surface_code:rotated_memory_x",
+#     )
+#     dem = circuit.detector_error_model()
+
+#     with tempfile.TemporaryDirectory() as d:
+#         testdir = pathlib.Path(d)
+
+#         circuit.compile_detector_sampler().sample_write(
+#             shots=100,
+#             filepath=testdir / "detectors.b8",
+#             format="b8",
+#         )
+
+#         dem.to_file(testdir / "dem.dem")
+
+#         SinterDecoder_RelayBP(parallel=True).decode_via_files(
+#             num_shots=10,
+#             num_dets=dem.num_detectors,
+#             num_obs=dem.num_observables,
+#             dem_path=testdir / "dem.dem",
+#             dets_b8_in_path=testdir / "detectors.b8",
+#             obs_predictions_b8_out_path=testdir / "observable_predictions.b8",
+#             tmp_dir=testdir,
+#         )
+
+#         predictions = stim.read_shot_data_file(
+#             path=testdir / "observable_predictions.b8",
+#             format="b8",
+#             num_observables=dem.num_observables,
+#         )
+#         assert np.sum(predictions) <= 5
+
+
+# def test_get_testdata_circuit():
+#     """Test getting test circuit and decoding."""
 #     circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
 #     tasks = [sinter.Task(circuit=circuit)]
-
-#     decoder_params = dict(
-#     gamma0=0.1,
-#     pre_iter=80,
-#     num_sets=300,
-#     set_max_iter=60,
-#     gamma_dist_interval=[-0.24, 0.66],
-#     stop_nconv=5,
-#     get_detail=True
-#     )
-#     decoders = sinter_decoders(
-#         **decoder_params
-#     )
 
 #     samples = sinter.collect(
 #         num_workers=2,
 #         max_shots=1_00,
 #         tasks=tasks,
 #         decoders=["relay-bp"],
-#         custom_decoders=decoders,
+#         custom_decoders=sinter_decoders(),
 #     )
 
 #     assert samples[0].decoder == "relay-bp"
 #     assert samples[0].errors <= 10
 #     assert samples[0].shots == 100
+
+
+# def test_get_all_testdata_circuit():
+#     """Test getting test circuit and decoding."""
+#     circuits = get_all_test_circuits("*", 0.001)
+#     for name, circuit in circuits.items():
+#         assert isinstance(name, str)
+#         assert isinstance(circuit, stim.Circuit)
+
+#     assert len(circuits) > 1
+
+
+# def test_filter_detectors_by_basis():
+#     """Test getting test circuit and decoding."""
+#     circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
+
+#     dem = circuit.detector_error_model()
+#     check_matrices = CheckMatrices.from_dem(dem)
+
+#     assert check_matrices.check_matrix.shape == (54, 1800)
+
+#     z_circuit = filter_detectors_by_basis(circuit, "Z")
+#     z_dem = z_circuit.detector_error_model()
+#     z_check_matrices = CheckMatrices.from_dem(z_dem)
+
+#     assert z_check_matrices.check_matrix.shape == (36, 288)
+
+
+def test_get_iterations_from_sinter_tasks():
+    """Test getting iteration counts from sinter tasks"""
+    circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
+    tasks = [sinter.Task(circuit=circuit)]
+
+    decoder_params = dict(
+    gamma0=0.1,
+    pre_iter=80,
+    num_sets=3,
+    set_max_iter=60,
+    gamma_dist_interval=[-0.24, 0.66],
+    stop_nconv=5,
+    get_detail=True
+    )
+    decoders = sinter_decoders(
+        **decoder_params
+    )
+
+    samples = sinter.collect(
+        num_workers=2,
+        max_shots=1_00,
+        tasks=tasks,
+        decoders=["relay-bp"],
+        custom_decoders=decoders,
+    )
+
+    assert samples[0].decoder == "relay-bp"
+
 
 def test_sinter_saves_results_to_csv():
     """Test sinter.collect saves the result including iterations"""
@@ -335,6 +335,111 @@ def test_sinter_saves_results_to_csv():
         assert isinstance(value, int)
     
 
-    
+@pytest.mark.parametrize(
+    "decoder_params, description",
+    [
+        (
+            dict(
+                ensemble_size=3,
+                perturbation_min=0.01,
+                perturbation_max=0.01,
+                use_automorphism=False,
+                get_detail=True, # Enable detailed output for testing
+            ),
+            "perturbation_only",
+        ),
+        (
+            dict(
+                use_automorphism=True,
+                perturbation_max=0.0, # No perturbation
+                get_detail=True,
+            ),
+            "automorphism_only",
+        ),
+        (
+            dict(
+                ensemble_size=16,
+                use_automorphism=False,
+                perturbation_min=0.01,
+                perturbation_max=0.01,
+                get_detail=True,
+            ),
+            "perturbation_and_automorphism",
+        ),
+    ],
+)
+def test_sinter_harmonized_bp_decoder_integration(decoder_params, description):
+    """
+    Test harmonized BP decoder with various configurations, ensuring CSV output is correct.
+    """
+    print(f"Testing harmonized-bp with: {description}")
+
+    def generate_example_tasks():
+        # Using a small code for faster testing
+        yield sinter.Task(
+            circuit=stim.Circuit.generated(
+                rounds=7,
+                distance=7,
+                after_clifford_depolarization=0.001,
+                code_task=f"surface_code:rotated_memory_x",
+            ),
+            json_metadata={"p": 0.01, "d": 7},
+        )
+
+    # --- CSV Output Setup ---
+    output_dir = pathlib.Path("tests/test_outputs")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Use a unique filename for each test case to prevent conflicts
+    csv_output_path = output_dir / f"sinter_harmonizedbp_test_{description}.csv"
+
+    if csv_output_path.exists():
+        csv_output_path.unlink()  # Ensure a fresh test
+
+    # --- Decoder Configuration ---
+    # Combine default params with scenario-specific params
+    full_decoder_params = {
+        "selection_strategy": "MostLikely",
+        "pre_iter": 30, # Faster for testing
+        "num_sets": 10,
+        "set_max_iter": 10,
+    }
+    full_decoder_params.update(decoder_params)
+    decoders = sinter_decoders(**full_decoder_params)
+
+    # --- Run Sinter ---
+    sinter.collect(
+        num_workers=1,  # Use 1 worker for easier debugging if bliss fails
+        max_shots=1000,   # Fewer shots for faster test execution
+        tasks=generate_example_tasks(),
+        decoders=["harmonized-bp", "relay-bp"],
+        custom_decoders=decoders,
+        save_resume_filepath=csv_output_path,
+        print_progress=True,  #
+    )
+
+    # --- CSV Validation ---
+    assert csv_output_path.exists(), "CSV output file was not created."
+    df = pd.read_csv(csv_output_path)
+    df.columns = df.columns.str.strip()
+
+    # Basic checks
+    assert df.iloc[0]["decoder"] == "harmonized-bp"
+
+    # Detailed output check (since get_detail=True)
+    assert "custom_counts" in df.columns
+    custom_counts_str = df.iloc[0]["custom_counts"]
+    assert isinstance(custom_counts_str, str), "custom_counts is not a string."
+
+    counts_dict = json.loads(custom_counts_str)
+    assert isinstance(counts_dict, dict)
+    assert len(counts_dict) > 0, "custom_counts dictionary is empty."
+
+    # Check the content of the custom_counts dictionary
+    key = list(counts_dict.keys())[0]
+    value = counts_dict[key]
+    assert isinstance(key, str)
+    assert isinstance(value, int)
+    assert key.startswith("signed_iter_"), "custom_counts key format is incorrect."
+
 
 

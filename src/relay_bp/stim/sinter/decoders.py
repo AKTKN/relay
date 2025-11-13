@@ -14,6 +14,10 @@ import pathlib
 
 from sinter import Decoder, CompiledDecoder
 import numpy as np
+import numpy.typing as npt
+
+import scipy.sparse as sparse
+from autdec.igraph_auts import random_vertex_graph_auts_from_bliss
 
 import stim
 
@@ -66,7 +70,6 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
 
             iterations[~coverage] = 9999
             
-
         else:
             predictions = self.observable_decoder.decode_observables_batch(
                 syndromes,
@@ -197,7 +200,122 @@ class SinterDecoder_BaseBP(Decoder):
             num_observables=dem.num_observables,
         )
 
+class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
+    def __init__(
+        self,
+        # --- relay-BP parameters ---
+        alpha: float | None = None,
+        gamma0: float = 0.1,
+        pre_iter: int = 60,
+        num_sets: int = 60,
+        set_max_iter: int = 60,
+        gamma_dist_interval: tuple[float, float] = (-0.24, 0.66),
+        explicit_gammas: np.ndarray | None = None,
+        stop_nconv: int = 5,
+        stopping_criterion: str = "nconv",
+        logging=False,        
+        # --- New parameters for harmonization ---
+        ensemble_size: int = 1,
+        selection_strategy: str = "MostLikely",
+        perturbation_min: float = 0.0,
+        perturbation_max: float = 0.0,
+        # --- For automorphism ---
+        use_automorphism: bool = False,
+        # --- BaseBP parameters ---
+        parallel: bool = False,
+        decomposed_hyperedges: bool | None = None,
+        prune_decided_errors: bool = True,
+        threshold: float = 0.0,
+        get_detail: bool = False    # if True, return detailed decoding info
+    ):
+        """Class for decoding stim circuits with the harmonized BP ensemble decoder."""
+        self.alpha = alpha
+        self.gamma0 = gamma0
+        self.pre_iter = pre_iter
+        self.num_sets = num_sets
+        self.set_max_iter = set_max_iter
+        self.gamma_dist_interval = tuple(gamma_dist_interval)
+        self.explicit_gammas = explicit_gammas
+        self.stop_nconv = stop_nconv
+        self.stopping_criterion = stopping_criterion
+        self.logging = logging
+        self.ensemble_size = ensemble_size
+        self.selection_strategy = selection_strategy
+        self.perturbation_min = perturbation_min
+        self.perturbation_max = perturbation_max
+        self.use_automorphism = use_automorphism
+        self.get_detail = get_detail
 
+        # 親クラスの__init__を呼び出す
+        super().__init__(
+            parallel=parallel,
+            decomposed_hyperedges=decomposed_hyperedges,
+            prune_decided_errors=prune_decided_errors,
+            threshold=threshold,
+            get_detail_result=get_detail
+        )
+
+    def build_observable_decoder(
+        self, check_matrices: CheckMatrices
+    ) -> relay_bp.ObservableDecoderRunner:
+        
+            
+        col_perms = None
+        row_perms = None
+        current_ensemble_size = self.ensemble_size
+
+        if self.use_automorphism:
+            assert self.ensemble_size >= 1, "Warning: ensemble_size should be at least 1 when using automorphism. Used identity."
+
+            col_perms = []
+            row_perms = []
+
+            if self.ensemble_size >= 2:
+                bliss_cols, bliss_rows = random_vertex_graph_auts_from_bliss(
+                    check_matrices.check_matrix, k=self.ensemble_size
+                )
+                col_perms.extend(bliss_cols)
+                row_perms.extend(bliss_rows)
+
+            identity_col = sparse.identity(check_matrices.check_matrix.shape[1], dtype=int, format='csr')
+            identity_row = sparse.identity(check_matrices.check_matrix.shape[0], dtype=int, format='csr')
+            col_perms.insert(0, identity_col)
+            row_perms.insert(0, identity_row)
+            
+            print(f"Debug: Found {len(col_perms)} automorphisms using bliss.")
+            current_ensemble_size = len(col_perms)
+            if current_ensemble_size < self.ensemble_size:
+                print(f"Warning: Only found {current_ensemble_size} automorphisms, which is less than the requested ensemble_size of {self.ensemble_size}. Using {current_ensemble_size} instead.")
+                self.ensemble_size = current_ensemble_size
+
+        self.col_permutations = col_perms
+        self.row_permutations = row_perms
+    
+        observable_decoder = relay_bp.ObservableDecoderRunner.with_ensemble_decoder(
+            ensemble_size=self.ensemble_size,
+            check_matrix=check_matrices.check_matrix,
+            observable_matrix=check_matrices.observables_matrix,
+            error_priors=check_matrices.error_priors,
+            alpha=self.alpha,
+            gamma0=self.gamma0,
+            pre_iter=self.pre_iter,
+            num_sets=self.num_sets,
+            set_max_iter=self.set_max_iter,
+            gamma_dist_interval=self.gamma_dist_interval,
+            explicit_gammas=self.explicit_gammas,
+            stop_nconv=self.stop_nconv,
+            stopping_criterion=self.stopping_criterion,
+            logging=self.logging,
+            selection_strategy=self.selection_strategy,
+            perturbation_min=self.perturbation_min,
+            perturbation_max=self.perturbation_max,
+            col_permutations=self.col_permutations,
+            row_permutations=self.row_permutations,
+        )
+
+        return observable_decoder
+    
+    
 class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
     def __init__(
         self,
@@ -363,8 +481,20 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     if gamma0 := decoder_kwargs.get("gamma0"):
         membp_config["gamma0"] = gamma0
 
+    harmonized_config = decoder_kwargs.copy()
+
+    relay_config = decoder_kwargs.copy()
+    
+    relay_config.pop("ensemble_size", None)
+    relay_config.pop("selection_strategy", None)
+    relay_config.pop("perturbation_min", None)
+    relay_config.pop("perturbation_max", None)
+    relay_config.pop("use_automorphism", None)
+
     return {
-        "relay-bp": SinterDecoder_RelayBP(**decoder_kwargs),  # type: ignore
+        # 修正：relay_config を使用する
+        "relay-bp": SinterDecoder_RelayBP(**relay_config),  # type: ignore
         "mem-bp": SinterDecoder_MemBP(**membp_config),  # type: ignore
         "msl-bp": SinterDecoder_MSLBP(**msl_config),  # type: ignore
+        "harmonized-bp": SinterDecoder_HarmonizedBP(**harmonized_config),  # type: ignore
     }

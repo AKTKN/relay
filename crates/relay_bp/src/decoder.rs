@@ -203,6 +203,43 @@ pub trait DecoderRunner: Decoder + Clone + Sync {
     }
 }
 
+#[derive(Clone)]
+pub struct AutomorphismWrapperDecoder {
+    inner_decoder: Box<dyn Decoder + Send>,
+    col_permutation: Arc<SparseBitMatrix>,
+    row_permutation: Arc<SparseBitMatrix>,
+}
+
+impl AutomorphismWrapperDecoder {
+    pub fn new(
+        inner_decoder: Box<dyn Decoder + Send>,
+        col_permutation: Arc<SparseBitMatrix>,
+        row_permutation: Arc<SparseBitMatrix>,
+    ) -> Self {
+        Self {inner_decoder, col_permutation, row_permutation}
+    }
+}
+
+impl Decoder for AutomorphismWrapperDecoder {
+    fn check_matrix(&self) -> Arc<SparseBitMatrix> {
+        self.inner_decoder.check_matrix()   // The check matrix has already been permuted when creating the child decoders. H' = H * A 
+    }
+
+    fn log_prior_ratios(&mut self) -> Array1<f64> {
+        self.inner_decoder.log_prior_ratios()
+    }
+
+    fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        // permutation of detectors: s' = B * s
+        let permuted_detectors = self.row_permutation.mul_mod2(&detectors.to_owned());
+
+        let result = self.inner_decoder.decode_detailed(permuted_detectors.view());
+
+        result
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DecodeResult {
     pub decoding: Array1<Bit>,
