@@ -208,11 +208,11 @@ where
     /// Decode with the inner decoder
     fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize) -> DecodeResult {
 
-        if detectors.iter().all(|&d| d == 0){
-            debug!("No detection events. Returning success immediately.");
-            return self.bp_decoder.build_result(true, Array1::zeros(detectors.dim()), max_iter)
+        // if detectors.iter().all(|&d| d == 0){
+        //     debug!("No detection events. Returning success immediately.");
+        //     return self.bp_decoder.build_result(true, Array1::zeros(detectors.dim()), max_iter)
 
-        }
+        // }
         let mut success: bool = false;
         let mut decoded_detectors = Array1::default(detectors.dim());
 

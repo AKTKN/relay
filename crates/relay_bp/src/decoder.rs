@@ -255,4 +255,18 @@ pub struct DecodeResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum BPExtraResult {
     None,
+    Ensemble(EnsembleExtraResult),
+}
+
+/// Extra information specific to ensemble decoding
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EnsembleExtraResult {
+    /// All correction results from each child decoder in the ensemble
+    pub all_corrections: Vec<Array1<Bit>>,
+    /// LLR sum for each correction (log-likelihood ratio)
+    pub llr_sums: Vec<f64>,
+    /// Coset (logical error) for each correction
+    pub cosets: Vec<Array1<Bit>>,
+    /// Index of the selected correction in the ensemble
+    pub selected_index: usize,
 }

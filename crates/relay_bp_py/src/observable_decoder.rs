@@ -288,7 +288,7 @@ impl ObservableDecoderRunner {
             _ => SelectionStrategy::MostLikely,
         };
 
-        let original_log_priors = error_priors_owned.mapv(|p| (p / (1.0 - p)).ln());
+        let original_log_priors = error_priors_owned.mapv(|p| ((1.0 - p)/p).ln());
         let original_log_priors_arc = Arc::new(original_log_priors);
 
         let ensemble_decoder = EnsembleDecoder::new(
