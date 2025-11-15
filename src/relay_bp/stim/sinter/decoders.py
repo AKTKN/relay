@@ -213,7 +213,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         explicit_gammas: np.ndarray | None = None,
         stop_nconv: int = 5,
         stopping_criterion: str = "nconv",
-        logging=False,        
+        logging=False,
+        seed:Optional[int] = None,        
         # --- New parameters for harmonization ---
         ensemble_size: int = 1,
         selection_strategy: str = "MostLikely",
@@ -244,6 +245,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
         self.use_automorphism = use_automorphism
+        self.seed = seed
         self.get_detail = get_detail
 
         # 親クラスの__init__を呼び出す
@@ -311,6 +313,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             perturbation_max=self.perturbation_max,
             col_permutations=self.col_permutations,
             row_permutations=self.row_permutations,
+            seed=self.seed
         )
 
         return observable_decoder
@@ -490,6 +493,7 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("perturbation_min", None)
     relay_config.pop("perturbation_max", None)
     relay_config.pop("use_automorphism", None)
+    relay_config.pop("seed", None)
 
     return {
         # 修正：relay_config を使用する

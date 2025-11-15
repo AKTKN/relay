@@ -29,6 +29,7 @@ use pyo3::types::PyList;
 use std::mem;
 use rand::Rng;
 use sprs::CsMat;
+use rand::random;
 
 #[pyclass(module = "observable_decoder")]
 pub struct ObservableDecodeResult {
@@ -127,13 +128,12 @@ impl ObservableDecoderRunner {
     }
 
 
-
     // Factory method to create an ObservableDecoderRunner with an EnsembleDecoder inside
     #[staticmethod]
     #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
         set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
         stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), 
-        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=0))]
+        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn with_ensemble_decoder(
         py: Python<'_>,
@@ -159,7 +159,7 @@ impl ObservableDecoderRunner {
         perturbation_max: f64,
         col_permutations: Option<&Bound<'_, PyAny>>,
         row_permutations: Option<&Bound<'_, PyAny>>,
-        seed: u64,
+        seed: Option<u64>,
     ) -> PyResult<Self> {
         // 1. Setyp parameters for child decoders
         let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
@@ -194,6 +194,8 @@ impl ObservableDecoderRunner {
             _ => StoppingCriterion::default(),
         };
 
+        let seed = seed.unwrap_or_else(rand::random::<u64>);
+
         let relay_config_templete = RelayDecoderConfig {
             pre_iter, num_sets, set_max_iter, gamma_dist_interval,
             explicit_gammas: explicit_gammas.map(|arr| arr.as_array().to_owned()),
@@ -207,17 +209,19 @@ impl ObservableDecoderRunner {
         // Create child decoders 
         for i in 0..ensemble_size {
             // Generate a random perturbation strongness within the specified range
-            let alpha_perturb = if perturbation_min < perturbation_max {
-                rng.gen_range(perturbation_min..perturbation_max)
-            } else {
-                0.0
-            };
+            // let alpha_perturb = if perturbation_min < perturbation_max {
+            //     rng.gen_range(perturbation_min..perturbation_max)
+            // } else {
+            //     0.0
+            // };
 
+            
             // Apply the perturbation to the error priors
-            let perturbed_priors = if alpha_perturb > 0.0 {
+            // but include no-perturbation case for the first decoder (i == 0)
+            let perturbed_priors = if (perturbation_min < perturbation_max) && (i != 0){
                 let mut new_priors = error_priors_owned.clone();
                 for p in new_priors.iter_mut(){
-                    let factor = rng.gen_range((1.0 - alpha_perturb)..=(1.0 + alpha_perturb));
+                    let factor = rng.gen_range((1.0 - perturbation_min)..=(1.0 + perturbation_max));
                     *p = (*p * factor).clamp(1e-15, 1.0 - 1e-15);
                 }
                 new_priors
