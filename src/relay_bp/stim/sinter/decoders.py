@@ -57,6 +57,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         if self.check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + self.check_matrices.syndrome_bias) % 2
 
+        iterations = None
+        converged = None
+        logical_gaps = None
+
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
                 syndromes,
@@ -275,7 +279,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
 
             if self.ensemble_size >= 2:
                 bliss_cols, bliss_rows = random_vertex_graph_auts_from_bliss(
-                    check_matrices.check_matrix, k=self.ensemble_size
+                    check_matrices.check_matrix, k=self.ensemble_size-1 # except identity
                 )
                 col_perms.extend(bliss_cols)
                 row_perms.extend(bliss_rows)
