@@ -66,9 +66,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             )
             predictions = np.array([res.observables for res in results])
             iterations = np.array([res.iterations for res in results])
-            coverage = np.array([res.converged for res in results])
+            converged = np.array([res.converged for res in results])
+            logical_gaps = np.array([res.logical_gap for res in results])
 
-            iterations[~coverage] = 9999
+            iterations[~converged] = 9999
             
         else:
             predictions = self.observable_decoder.decode_observables_batch(
@@ -83,7 +84,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
         if self.get_detail:
-            return outputs, iterations
+            return outputs, iterations, converged, logical_gaps
         else:
             return outputs
 
@@ -245,7 +246,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
         self.use_automorphism = use_automorphism
-        self.seed = seed
+        self.seed = np.random.randint(0, 2**32 - 1) if seed is None else seed
         self.get_detail = get_detail
 
         # 親クラスの__init__を呼び出す
@@ -336,7 +337,8 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
-        get_detail: bool = False    # if True, return detailed decoding info
+        get_detail: bool = False,    # if True, return detailed decoding info
+        seed: Optional[int] = None,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.alpha = alpha
@@ -350,6 +352,7 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         self.stopping_criterion = stopping_criterion
         self.logging = logging
         self.get_detail = get_detail
+        self.seed = np.random.randint(0, 2**32 - 1) if seed is None else seed
         super().__init__(
             parallel=parallel,
             decomposed_hyperedges=decomposed_hyperedges,
@@ -375,6 +378,7 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
             stop_nconv=self.stop_nconv,
             stopping_criterion=self.stopping_criterion,
             logging=self.logging,
+            seed=self.seed, 
         )
 
         observable_decoder = relay_bp.ObservableDecoderRunner(
@@ -493,7 +497,7 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("perturbation_min", None)
     relay_config.pop("perturbation_max", None)
     relay_config.pop("use_automorphism", None)
-    relay_config.pop("seed", None)
+    # relay_config.pop("seed", None)
 
     return {
         # 修正：relay_config を使用する

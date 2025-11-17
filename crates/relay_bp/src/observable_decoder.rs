@@ -76,6 +76,7 @@ impl<'a> ObservableDecoderRunner<'a> {
             observables,
             converged: decode_result.success,
             iterations: decode_result.iterations,
+            logical_gap: decode_result.logical_gap,
             true_decoding: None,
             physical_decode_result: if self.include_decode_result {
                 Some(decode_result)
@@ -240,6 +241,7 @@ impl<'a> ObservableDecoderRunner<'a> {
             observables,
             converged: decode_result.success,
             iterations: decode_result.iterations,
+            logical_gap: decode_result.logical_gap,
             true_decoding: Some(TrueDecodingResults {
                 error_detected,
                 error_mismatch_detected,
@@ -418,6 +420,7 @@ pub struct ObservableDecodeResult {
     pub observables: Array1<Bit>,
     pub converged: bool,
     pub iterations: usize,
+    pub logical_gap: Option<f64>,
     pub true_decoding: Option<TrueDecodingResults>,
     pub physical_decode_result: Option<DecodeResult>,
 }

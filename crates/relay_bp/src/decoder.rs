@@ -249,6 +249,7 @@ pub struct DecodeResult {
     pub decoding_quality: f64,
     pub iterations: usize,
     pub max_iter: usize,
+    pub logical_gap: Option<f64>,
     pub extra: BPExtraResult,
 }
 

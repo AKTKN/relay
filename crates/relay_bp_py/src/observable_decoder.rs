@@ -71,6 +71,11 @@ impl ObservableDecodeResult {
     }
 
     #[getter]
+    pub fn logical_gap(&self) -> Option<f64> {
+        self.inner.logical_gap
+    }
+
+    #[getter]
     pub fn unconverged_no_error(&self) -> Option<bool> {
         let true_decoding = self.inner.true_decoding.as_ref()?;
         Some(true_decoding.unconverged_no_error)

@@ -1,6 +1,7 @@
 // Import necessary components and modules
 use crate::decoder::{Bit, DecodeResult, Decoder, DecoderRunner, SparseBitMatrix, Mod2Mul}; // Besic type and trait imports
-use ndarray::{Array1, ArrayView1}; // 1-dimentional ndarray crate for error and syndrome vecrtors
+use ndarray::{Array1, ArrayView1}; use core::f64;
+// 1-dimentional ndarray crate for error and syndrome vecrtors
 use std::sync::Arc; // Smart pointer for shared owenership, this is useful for sharing data like chack matrices across multiple decoders.
 use ndarray::s;
 
@@ -83,83 +84,335 @@ impl Decoder for EnsembleDecoder{
             .map(|decoder| decoder.decode_detailed(detectors.view()))
             .collect();
 
+        let first_result = results.first()
+            .cloned()
+            .expect("EnsembleDecoder requires at least one decoder.");
+        let converged_results: Vec<DecodeResult> = results.into_iter().filter(|r| r.success).collect();
+        if converged_results.is_empty()  {
+            let mut res = first_result;
+            res.logical_gap = None;
+            return res;
+        }
+
+        // Pre-computation for soft-information
+        use std::collections::HashMap;
+        let obs_matrix = self.observable_matrix.as_ref().expect("observable_matrix is required for decoding.");
+        let log_priors = self.original_log_priors.as_ref().expect("original_log_priors is required for decoding.");
+
+        // This HashMap will store (DecodeResult, llrCost) tuples, keyed by logical_error
+        let mut coset_groups: HashMap<Array1<Bit>, Vec<(DecodeResult, f64)>> = HashMap::new();
+
+        // Calculate LLR costs and group results by coset
+        for result in converged_results {
+            let logical_error = obs_matrix.mul_mod2(&result.decoding);
+            let llr_cost = result.decoding.iter().zip(log_priors.iter())
+                .filter(|(&c, _)| c == 1)
+                .map(|(_, &llr_val)| llr_val)
+                .sum::<f64>();
+            coset_groups.entry(logical_error).or_default().push((result, llr_cost));
+        }
+
+        // Find the minimum LLR within each coset
+        let coset_min_llrs: HashMap<Array1<Bit>, (DecodeResult, f64)> = coset_groups.iter()
+            .map(|(coset, results_in_coset)| {
+                let (best_result, min_llr) = results_in_coset.iter()
+                    .min_by(|(_, llr_a), (_, llr_b)| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(r, l)| (r.clone(), *l))
+                    .unwrap(); // This unwrap is safe because the vector is never empty
+                (coset.clone(), (best_result, min_llr))
+            })
+            .collect();
+
         // 2. Select the final correction based on the chosen strategy
         match self.strategy{
-            
             // --- MostLikely Strategy ---
-            // Selects the single result with the minimum LLR cost.
             SelectionStrategy::MostLikely =>{
-                // Get the log-priors, which must be log((1-p)/p) (positive costs).
-                let log_priors = self.original_log_priors.as_ref().unwrap();
+                // Find the result with the overall minimum LLR cost.
+                let (final_coset, (mut final_result, llr_final)) = coset_min_llrs.iter()
+                    .min_by(|(_, (_, llr_a)), (_, (_, llr_b))| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(c, (r, l))| (c.clone(), (r.clone(), *l)))
+                    .expect("No converged results to compare for MostLikely strategy.");
 
-                results.into_iter()
-                    // Find the result with the minimum cost by comparing pairs.
-                    .min_by(|a, b| {
-                        // Calculate LLR cost for 'a'
-                        // Cost = sum_{i where c_i=1} log((1-p_i)/p_i)
-                        let llr_cost_a = a.decoding.iter().zip(log_priors.iter())
-                            .filter(|(&c, _)| c == 1) // Find indices where error bit c_i is 1
-                            .map(|(_, &llr_cost)| llr_cost) // Get the corresponding cost
-                            .sum::<f64>();
-                        
-                        // Calculate LLR cost for 'b'
-                        let llr_cost_b = b.decoding.iter().zip(log_priors.iter())
-                            .filter(|(&c, _)| c == 1)
-                            .map(|(_, &llr_cost)| llr_cost)
-                            .sum::<f64>();
-                        
-                        // Compare f64 costs using partial_cmp
-                        llr_cost_a.partial_cmp(&llr_cost_b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .expect("No results to compare for MostLikely strategy.")
+                // Find the next smallest LLR from a *different* coset.
+                let llr_next_best = coset_min_llrs.iter()
+                    .filter(|(coset, _)| *coset != &final_coset)
+                    .map(|(_, (_, llr))| *llr)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                let soft_information = if let Some(next_llr) = llr_next_best {
+                    next_llr - llr_final
+                } else {
+                    f64::INFINITY // All results were in the same coset
+                };
+
+                // TODO: Add soft_information to the DecodeResult struct later
+                // println!("[MostLikely] Soft Information: {}", soft_information);
+
+                final_result.logical_gap = Some(soft_information);
+                final_result
             }
             
             // --- MajorityVote Strategy ---
-            // 1. All results vote for a logical coset.
-            // 2. The coset with the most votes wins.
-            // 3. From the winning coset, select the result with the minimum LLR cost.
             SelectionStrategy::MajorityVote => {
-                use std::collections::HashMap;
-                let obs_matrix = self.observable_matrix.as_ref().unwrap();
-                // Get log-priors, as they are needed for the final LLR cost comparison.
-                let log_priors = self.original_log_priors.as_ref()
-                    .expect("original_log_priors is required for MajorityVote strategy.");
+                // Find the winning coset (the one with the most votes)
+                let (winning_coset, _) = coset_groups.iter()
+                    .max_by_key(|(_, v)| v.len())
+                    .map(|(c, v)| (c.clone(), v.len()))
+                    .expect("No converged results to vote on for MajorityVote strategy.");
 
-                // This HashMap will store (DecodeResult, LLR_Cost) tuples, keyed by logical_error
-                let mut coset_votes: HashMap<Array1<Bit>, Vec<(DecodeResult, f64)>> = HashMap::new();
+                // Get the best result from the winning coset
+                let (mut final_result, llr_final) = coset_min_llrs.get(&winning_coset).unwrap().clone();
 
-                // --- Step 1 & 2: Calculate LLR costs and vote by coset in one pass ---
-                for result in results {
-                    // Determine the logical coset for this result
-                    let logical_error = obs_matrix.mul_mod2(&result.decoding);
-                    
-                    // Calculate the LLR cost for this result
-                    let llr_cost = result.decoding.iter().zip(log_priors.iter())
-                        .filter(|(&c, _)| c == 1)
-                        .map(|(_, &llr_val)| llr_val)
-                        .sum::<f64>();
-                        
-                    // Add the (result, cost) tuple to the corresponding coset's vector
-                    coset_votes.entry(logical_error).or_default().push((result, llr_cost));
-                }
+                // Find the second most voted coset
+                let second_coset = coset_groups.iter()
+                    .filter(|(coset, _)| *coset != &winning_coset)
+                    .max_by_key(|(_, v)| v.len());
 
-                // --- Step 3: Find the winning coset (the one with the most votes) ---
-                let winning_coset_results = coset_votes.into_values()
-                    .max_by_key(|v| v.len())
-                    .expect("No results to vote on for MajorityVote strategy.");
+                let soft_information = if let Some((second_coset_key, _)) = second_coset {
+                    // Get the minimum LLR from the second winning coset
+                    let (_, llr_next_best) = coset_min_llrs.get(second_coset_key).unwrap();
+                    *llr_next_best - llr_final
+                } else {
+                    f64::INFINITY // Only one coset was found
+                };
 
-                // --- Step 4: Select the result with the minimum LLR cost from the winning coset ---
-                let (final_result, _final_llr_cost) = winning_coset_results.into_iter()
-                    .min_by(|(_, llr_a), (_, llr_b)| { 
-                        // Compare the f64 LLR costs
-                        llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .expect("Winning coset was empty."); // This gives the (DecodeResult, f64) tuple
+                // TODO: Add soft_information to the DecodeResult struct later
+                // println!("[MajorityVote] Soft Information: {}", soft_information);
                 
-                final_result // Return only the DecodeResult part
+                final_result.logical_gap = Some(soft_information);
+                final_result
             }
         }
+        // match self.strategy{
+        //     // --- MostLikely Strategy ---
+        //     // Selects the single result with the minimum LLR cost.
+        //     SelectionStrategy::MostLikely =>{
+        //         // Get the log-priors, which must be log((1-p)/p) (positive costs).
+        //         let log_priors = self.original_log_priors.as_ref().unwrap();
+
+        //         converged_results.into_iter()
+        //             // Find the result with the minimum cost by comparing pairs.
+        //             .min_by(|a, b| {
+        //                 // Calculate LLR cost for 'a'
+        //                 // Cost = sum_{i where c_i=1} log((1-p_i)/p_i)
+        //                 let llr_cost_a = a.decoding.iter().zip(log_priors.iter())
+        //                     .filter(|(&c, _)| c == 1) // Find indices where error bit c_i is 1
+        //                     .map(|(_, &llr_cost)| llr_cost) // Get the corresponding cost
+        //                     .sum::<f64>();
+                        
+        //                 // Calculate LLR cost for 'b'
+        //                 let llr_cost_b = b.decoding.iter().zip(log_priors.iter())
+        //                     .filter(|(&c, _)| c == 1)
+        //                     .map(|(_, &llr_cost)| llr_cost)
+        //                     .sum::<f64>();
+                        
+        //                 // Compare f64 costs using partial_cmp
+        //                 llr_cost_a.partial_cmp(&llr_cost_b).unwrap_or(std::cmp::Ordering::Equal)
+        //             })
+        //             .expect("No results to compare for MostLikely strategy.")
+        //     }
+            
+        //     // --- MajorityVote Strategy ---
+        //     // 1. All results vote for a logical coset.
+        //     // 2. The coset with the most votes wins.
+        //     // 3. From the winning coset, select the result with the minimum LLR cost.
+        //     SelectionStrategy::MajorityVote => {
+        //         use std::collections::HashMap;
+        //         let obs_matrix = self.observable_matrix.as_ref().unwrap();
+        //         // Get log-priors, as they are needed for the final LLR cost comparison.
+        //         let log_priors = self.original_log_priors.as_ref()
+        //             .expect("original_log_priors is required for MajorityVote strategy.");
+
+        //         // This HashMap will store (DecodeResult, LLR_Cost) tuples, keyed by logical_error
+        //         let mut coset_votes: HashMap<Array1<Bit>, Vec<(DecodeResult, f64)>> = HashMap::new();
+
+        //         // --- Step 1 & 2: Calculate LLR costs and vote by coset in one pass ---
+        //         for result in converged_results {
+        //             // Determine the logical coset for this result
+        //             let logical_error = obs_matrix.mul_mod2(&result.decoding);
+                    
+        //             // Calculate the LLR cost for this result
+        //             let llr_cost = result.decoding.iter().zip(log_priors.iter())
+        //                 .filter(|(&c, _)| c == 1)
+        //                 .map(|(_, &llr_val)| llr_val)
+        //                 .sum::<f64>();
+                        
+        //             // Add the (result, cost) tuple to the corresponding coset's vector
+        //             coset_votes.entry(logical_error).or_default().push((result, llr_cost));
+        //         }
+
+        //         // --- Step 3: Find the winning coset (the one with the most votes) ---
+        //         let winning_coset_results = coset_votes.into_values()
+        //             .max_by_key(|v| v.len())
+        //             .expect("No converged results to vote on for MajorityVote strategy.");
+
+        //         // --- Step 4: Select the result with the minimum LLR cost from the winning coset ---
+        //         let (final_result, _final_llr_cost) = winning_coset_results.into_iter()
+        //             .min_by(|(_, llr_a), (_, llr_b)| { 
+        //                 // Compare the f64 LLR costs
+        //                 llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal)
+        //             })
+        //             .expect("Winning coset was empty."); // This gives the (DecodeResult, f64) tuple
+                
+        //         final_result // Return only the DecodeResult part
+        //     }
+        // }
     }
+    
+    // fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult{
+    //     let results: Vec<DecodeResult> = self
+    //         .decoders
+    //         .iter_mut()
+    //         .map(|decoder| decoder.decode_detailed(detectors.view()))
+    //         .collect();
+
+    //     let first_result = results.first()
+    //         .cloned()
+    //         .expect("EnsembleDecoder requires at least one decoder.");
+    //     let converged_results: Vec<DecodeResult> = results.into_iter().filter(|r| r.success).collect();
+    //     if converged_results.is_empty()  {
+    //         return first_result;
+    //     }
+
+    //     // Here we decide final correction 
+    //     match self.strategy{
+    //         SelectionStrategy::MostLikely =>{
+    //             let log_priors = self.original_log_priors.as_ref().unwrap();
+
+    //             // debug
+    //             println!("Error priors (log ratios): {:?}", log_priors);
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ1: 各デコード結果とLLRコストを計算
+    //             // -----------------------------------------------------------------
+    //             let results_with_llr: Vec<(DecodeResult, f64)> = converged_results.into_iter().map(|result| {
+    //                 let llr_cost = result.decoding.iter().zip(log_priors.iter())
+    //                     .filter(|(&c, _)| c == 1) // エラーがある(c=1)のインデックスのみ
+    //                     .map(|(_, &llr_val)| llr_val)     // 対応するlog_prior (コスト) を取得
+    //                     .sum::<f64>();
+    //                 (result, llr_cost)
+    //             }).collect();
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ2: 全デコード結果の情報を出力
+    //             // -----------------------------------------------------------------
+    //             println!("\n--- [EnsembleDecoder Debug: MostLikely] ---");
+    //             println!("Total results received: {}", results_with_llr.len());
+                
+    //             for (i, (result, llr_cost)) in results_with_llr.iter().enumerate() {
+    //                 let error_indices: Vec<usize> = result.decoding.iter().enumerate()
+    //                     .filter(|(_, &bit)| bit == 1)
+    //                     .map(|(index, _)| index)
+    //                     .collect();
+    //                 let weight = error_indices.len();
+
+    //                 println!("  Result {}: Weight = {}, LLR Cost = {:.6}", i, weight, llr_cost);
+    //                 // エラーベクトル全体は巨大すぎる可能性があるため、エラー(1)のインデックスのみ表示
+    //                 println!("    Error Indices: {:?}", error_indices);
+    //             }
+    //             println!("---");
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ3: 最小LLRのものを選択
+    //             // -----------------------------------------------------------------
+    //             // 計算済みのLLRを使って最小のものを探す
+    //             let (final_result, final_llr) = results_with_llr.into_iter()
+    //                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    //                 .expect("No results to compare for MostLikely strategy.");
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ4: 最終選択の情報を出力
+    //             // -----------------------------------------------------------------
+    //             let final_weight = final_result.decoding.sum();
+    //             println!("Final Selection: Weight = {}, LLR Cost = {:.6}", final_weight, final_llr);
+    //             println!("----------------------------------------------\n");
+
+    //             final_result
+    //         }
+            
+    //         SelectionStrategy::MajorityVote => {
+    //             use std::collections::HashMap;
+    //             let obs_matrix = self.observable_matrix.as_ref().unwrap();
+    //             let log_priors = self.original_log_priors.as_ref().expect("original_log_priors is required for MajorityVote strategy.");
+                
+    //             println!("Error priors (log ratios): {:?}", log_priors);
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ1: 各デコード結果と論理エラーを収集
+    //             // -----------------------------------------------------------------
+    //             // debug
+    //             let mut decoded_data = Vec::new();
+    //             for (i, result) in converged_results.into_iter().enumerate() {
+    //                 let logical_error = obs_matrix.mul_mod2(&result.decoding);
+    //                 let weight = result.decoding.iter().zip(log_priors.iter())
+    //                     .filter(|(&c, _)| c == 1)
+    //                     .map(|(_, &llr_val)| llr_val)
+    //                     .sum::<f64>();
+    //                 decoded_data.push((i, result, logical_error, weight));
+    //             }
+
+    //             println!("\n--- [EnsembleDecoder Debug: MajorityVote] ---");
+    //             println!("Total results received: {}", decoded_data.len());
+    //             for (i, result, logical_error, weight) in &decoded_data {
+    //                 let logical_error_vec: Vec<Bit> = logical_error.to_vec();
+    //                 println!("  Result {}: Weight = {}, Logical Error = {:?}", i, *weight, logical_error_vec);
+                    
+    //                 let error_indices: Vec<usize> = result.decoding.iter().enumerate()
+    //                     .filter(|(_, &bit)| bit == 1)
+    //                     .map(|(index, _)| index)
+    //                     .collect();
+    //                 println!("    Error Indices: {:?}", error_indices);
+    //             }
+    //             println!("---");
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ2: コセットごとに投票
+    //             // -----------------------------------------------------------------
+    //             // (Result, Weight) のタプルを保存して、後の最小重み比較の計算を省略
+    //             let mut coset_votes: HashMap<Array1<Bit>, Vec<(DecodeResult, f64)>> = HashMap::new();
+    //             for (_, result, logical_error, weight) in decoded_data {
+    //                 coset_votes.entry(logical_error).or_default().push((result, weight));
+    //             }
+
+    //             println!("Coset Voting Results:");
+    //             for (logical_error, results_in_coset) in coset_votes.iter() {
+    //                 let logical_error_vec: Vec<Bit> = logical_error.to_vec();
+    //                 println!("  Coset {:?}: {} votes", logical_error_vec, results_in_coset.len());
+    //             }
+    //             println!("---");
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ3: 勝利コセットの決定
+    //             // -----------------------------------------------------------------
+    //             let (winning_coset_logical_error, winning_coset_results) = coset_votes.into_iter()
+    //                 .max_by_key(|(_, v)| v.len())
+    //                 .map(|(key, value)| (key, value)) // HashMapのエントリからタプルに変換
+    //                 .expect("No results to vote on for MajorityVote strategy.");
+                
+    //             let winning_logical_error_vec: Vec<Bit> = winning_coset_logical_error.to_vec();
+    //             println!("Winning Coset: {:?} (with {} votes)", winning_logical_error_vec, winning_coset_results.len());
+
+
+    //             // -----------------------------------------------------------------
+    //             // [デバッグ] ステップ4: 勝利コセット内で最小重みを選択
+    //             // -----------------------------------------------------------------
+    //             // 保存しておいた重み `weight` で比較
+    //             let (final_result, final_weight) = winning_coset_results.into_iter()
+    //                 // min_by は Option<(DecodeResult, f64)> を返す
+    //                 .min_by(|(_, llr_a), (_, llr_b)| { 
+    //                     // f64 (LLRコスト) 同士を直接比較
+    //                     llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal)
+    //                 })
+    //                 // Option をアンラップして (DecodeResult, f64) を取り出す
+    //                 .expect("Winning coset was empty.");
+
+    //             // final_weight が LLR コスト
+    //             println!("Final Selection: LLR Cost = {:.6}, From Coset = {:?}", final_weight, winning_logical_error_vec);
+    //             println!("----------------------------------------------------------------\n");
+
+    //             final_result
+    //         }
+    //     }
+    // }
 }
     // fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult{
     //     let results: Vec<DecodeResult> = self
@@ -388,7 +641,7 @@ mod tests {
         let detectors_144_12_12: Array2<Bit> =
             read_npy(resources.join("144_12_12_detectors.npy")).expect("Unable to open");
 
-        let ensemble_size = 32;
+        let ensemble_size = 8;
         let mut child_decoders : Vec<Box<dyn Decoder + Send>> = Vec::new();
 
         for i in 0..ensemble_size{
@@ -405,8 +658,8 @@ mod tests {
                 pre_iter: 10,
                 num_sets: 3,
                 set_max_iter: 20,
-                // gamma_dist_interval: (-0.25, 0.60),
-                gamma_dist_interval: (-2.25, -1.1),
+                gamma_dist_interval: (-0.25, 0.60),
+                // gamma_dist_interval: (-2.25, -1.1),
                 seed: i,
                 ..Default::default()
             });
@@ -426,7 +679,7 @@ mod tests {
 
         let ensemble_decoder = EnsembleDecoder::new(
             child_decoders,
-            SelectionStrategy::MajorityVote,
+            SelectionStrategy::MostLikely,
             Some(original_log_priors),
             Some(observable_matrix.clone()), // MajorityVoteにはobservable_matrixが必要
         );
@@ -444,7 +697,7 @@ mod tests {
         // ObservableDecoderRunnerが提供するメソッドを使ってデコードします。
         // これにより、内部でensemble_decoder.decode()が呼ばれ、
         // その結果を使って論理エラーが計算されます。
-        let logical_errors = observable_ensemble_decoder.decode_observables_batch(detectors_144_12_12.slice(s![0..10, ..]));
+        let logical_errors = observable_ensemble_decoder.decode_observables_batch(detectors_144_12_12.slice(s![0..30, ..]));
 
         println!("Ensemble Observable Decoding Test Passed!");
         println!("error prior: {:?}", code_144_12_12.error_priors);
