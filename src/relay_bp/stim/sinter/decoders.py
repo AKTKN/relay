@@ -85,8 +85,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
 
             # else:
                 # Fallback to regular iterations with inf for non-converged
-                # iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
-                # iterations[~converged] = np.inf
+                iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
+                iterations[~converged] = np.inf
                 
         else:
             predictions = self.observable_decoder.decode_observables_batch(
