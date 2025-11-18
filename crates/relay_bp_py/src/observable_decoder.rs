@@ -25,7 +25,7 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2}
 use ndarray::Array1;
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult};
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyDict};
 use std::mem;
 use rand::Rng;
 use sprs::CsMat;
@@ -99,6 +99,46 @@ impl ObservableDecodeResult {
             return Some(DecodeResult::new(result.clone()));
         }
         None
+    }
+
+    #[getter]
+    pub fn extra<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        if let Some(phys_result) = &self.inner.physical_decode_result {
+            match &phys_result.extra {
+                relay_bp::decoder::BPExtraResult::None => Ok(py.None()),
+                relay_bp::decoder::BPExtraResult::Ensemble(ensemble_extra) => {
+                    let dict = PyDict::new(py);
+                    
+                    // all_corrections as list of numpy arrays
+                    let corrections_list: Vec<_> = ensemble_extra
+                        .all_corrections
+                        .iter()
+                        .map(|arr| PyArray1::from_array(py, arr).into_py(py))
+                        .collect();
+                    dict.set_item("all_corrections", corrections_list)?;
+                    
+                    // llr_sums as list of floats
+                    dict.set_item("llr_sums", ensemble_extra.llr_sums.clone())?;
+                    
+                    // cosets as list of numpy arrays
+                    let cosets_list: Vec<_> = ensemble_extra
+                        .cosets
+                        .iter()
+                        .map(|arr| PyArray1::from_array(py, arr).into_py(py))
+                        .collect();
+                    dict.set_item("cosets", cosets_list)?;
+                    
+                    dict.set_item("selected_index", ensemble_extra.selected_index)?;
+                    dict.set_item("child_iterations", ensemble_extra.child_iterations.clone())?;
+                    dict.set_item("child_success", ensemble_extra.child_success.clone())?;
+                    dict.set_item("effective_iterations", ensemble_extra.effective_iterations)?;
+                    
+                    Ok(dict.into())
+                }
+            }
+        } else {
+            Ok(py.None())
+        }
     }
 }
 

@@ -16,6 +16,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use relay_bp::bipartite_graph::BipartiteGraph;
 use relay_bp::decoder::{
     Bit, DecodeResult as DecodeResultInner, Decoder as DecoderInner, SparseBitMatrix,
+    BPExtraResult, EnsembleExtraResult,
 };
 
 pub fn get_sprs_bit_matrix_from_python(

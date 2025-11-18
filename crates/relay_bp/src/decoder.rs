@@ -270,4 +270,14 @@ pub struct EnsembleExtraResult {
     pub cosets: Vec<Array1<Bit>>,
     /// Index of the selected correction in the ensemble
     pub selected_index: usize,
+
+    /// Iterations for each child decoder
+    #[serde(default)]
+    pub child_iterations: Vec<usize>,
+    /// Convergence flag for each child decoder
+    #[serde(default)]
+    pub child_success: Vec<bool>,
+    /// Effective ensemble iterations (max(child_iterations)) or +inf if any child failed
+    #[serde(default)]    
+    pub effective_iterations: Option<f64>,
 }

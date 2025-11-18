@@ -69,12 +69,25 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                 leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
             )
             predictions = np.array([res.observables for res in results])
-            iterations = np.array([res.iterations for res in results])
             converged = np.array([res.converged for res in results])
             logical_gaps = np.array([res.logical_gap for res in results])
 
-            iterations[~converged] = 9999
-            
+            # Try to use effective_iterations from ensemble extra if available
+            extra = results[0].extra
+            if extra is not None and extra.get("effective_iterations") is not None:
+                # print(f"Debug: Using effective_iterations from ensemble extra")
+                # print(f"Debug: Sample effective_iterations values (first 5): {[res.extra.get('effective_iterations') if res.extra is not None else None for res in results[:5]]}")
+                # Use effective_iterations from all results
+                iterations = np.array([
+                    res.extra["effective_iterations"] if res.extra is not None else float(res.iterations)
+                    for res in results
+                ], dtype=float)
+
+            # else:
+                # Fallback to regular iterations with inf for non-converged
+                # iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
+                # iterations[~converged] = np.inf
+                
         else:
             predictions = self.observable_decoder.decode_observables_batch(
                 syndromes,

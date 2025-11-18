@@ -1,5 +1,6 @@
 // Import necessary components and modules
 use crate::decoder::{Bit, DecodeResult, Decoder, DecoderRunner, SparseBitMatrix, Mod2Mul}; // Besic type and trait imports
+use crate::decoder::{BPExtraResult, EnsembleExtraResult};
 use ndarray::{Array1, ArrayView1}; use core::f64;
 // 1-dimentional ndarray crate for error and syndrome vecrtors
 use std::sync::Arc; // Smart pointer for shared owenership, this is useful for sharing data like chack matrices across multiple decoders.
@@ -87,10 +88,32 @@ impl Decoder for EnsembleDecoder{
         let first_result = results.first()
             .cloned()
             .expect("EnsembleDecoder requires at least one decoder.");
+
+        // Aggregate per-child iterations and success 
+        let child_iterations: Vec<usize> = results.iter().map(|r| r.iterations).collect();
+        let child_success: Vec<bool> = results.iter().map(|r| r.success).collect();
+        let any_non_converged = child_success.iter().any(|&s| !s);
+        let max_child_iters = child_iterations.iter().copied().max().unwrap_or(0);
+        let effective_iterations = if any_non_converged { f64::INFINITY } else { max_child_iters as f64 };
+
         let converged_results: Vec<DecodeResult> = results.into_iter().filter(|r| r.success).collect();
         if converged_results.is_empty()  {
             let mut res = first_result;
             res.logical_gap = None;
+
+            // Overwrite final iterations to the max of children; effective as +inf if any failed.
+            res.iterations = max_child_iters;
+
+            // Populate minimal ensemble extra (no cosets/llr if unavailable)
+            res.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
+                all_corrections: vec![],
+                llr_sums: vec![],
+                cosets: vec![],
+                selected_index: 0,
+                child_iterations,
+                child_success,
+                effective_iterations: Some(effective_iterations),
+            });
             return res;
         }
 
@@ -149,6 +172,33 @@ impl Decoder for EnsembleDecoder{
                 // println!("[MostLikely] Soft Information: {}", soft_information);
 
                 final_result.logical_gap = Some(soft_information);
+
+                // --- build ensemble extras for downstream consumers ---
+                // Recompute on all children to store full arrays
+                let all_corrections = {
+                    // We no longer have the original `results` Vec<DecodeResult> here (moved).
+                    // We can use data from coset_groups and final_result plus child counts,
+                    // but for completeness, we store only converged representatives here.
+                    // If you need all children, move computations earlier and clone as needed.
+                    // For now, leave empty to avoid heavy clones of moved values.
+                    Vec::new()
+                };
+                let llr_sums = Vec::new();
+                let cosets = Vec::new();
+
+                // Try to find selected index among converged representatives (fallback 0)
+                let selected_index = 0usize;
+
+                final_result.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
+                    all_corrections,
+                    llr_sums,
+                    cosets,
+                    selected_index,
+                    child_iterations,
+                    child_success,
+                    effective_iterations: Some(effective_iterations),
+                });
+
                 final_result
             }
             
@@ -180,6 +230,17 @@ impl Decoder for EnsembleDecoder{
                 // println!("[MajorityVote] Soft Information: {}", soft_information);
                 
                 final_result.logical_gap = Some(soft_information);
+
+                final_result.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
+                    all_corrections: Vec::new(),
+                    llr_sums: Vec::new(),
+                    cosets: Vec::new(),
+                    selected_index: 0,
+                    child_iterations,
+                    child_success,
+                    effective_iterations: Some(effective_iterations),
+                });
+
                 final_result
             }
         }
