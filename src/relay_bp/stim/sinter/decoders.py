@@ -83,7 +83,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     for res in results
                 ], dtype=float)
 
-            # else:
+            else:
                 # Fallback to regular iterations with inf for non-converged
                 iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
                 iterations[~converged] = np.inf
