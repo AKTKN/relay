@@ -17,4 +17,5 @@ from .decoders import (
     SinterDecoder_MSLBP,
     SinterDecoder_RelayBP,
     sinter_decoders,
+    build_decoders,
 )

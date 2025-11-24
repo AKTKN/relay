@@ -27,6 +27,9 @@ from .check_matrices import CheckMatrices
 
 from typing import TYPE_CHECKING, Optional
 
+from ldpc.sinter_decoders import SinterBpOsdDecoder
+from ldpc.sinter_decoders.sinter_lsd_decoder import SinterLsdDecoder
+
 
 class SinterCompiledDecoder_BP(CompiledDecoder):
     def __init__(
@@ -150,6 +153,8 @@ class SinterDecoder_BaseBP(Decoder):
             get_detail=self.get_detail_result,
         )
 
+
+    # relay-basedではこれは使われない。osdやlsdとの互換性の都合上、iterations_out_pathは現状コメントアウト。もしこれを考慮する場合、例外処理、及びOptional等でsinterを修正する必要がある。
     def decode_via_files(
         self,
         *,
@@ -160,7 +165,7 @@ class SinterDecoder_BaseBP(Decoder):
         dets_b8_in_path: pathlib.Path,
         obs_predictions_b8_out_path: pathlib.Path,
         tmp_dir: pathlib.Path,
-        iterations_out_path: Optional[pathlib.Path] = None, 
+        # iterations_out_path: Optional[pathlib.Path] = None, 
     ) -> None:
 
         dem = stim.DetectorErrorModel.from_file(dem_path)
@@ -193,12 +198,12 @@ class SinterDecoder_BaseBP(Decoder):
             predictions = np.array([res.observables for res in results])
             iterations = np.array([res.iterations for res in results])
 
-            if iterations_out_path is not None:
-                with open(iterations_out_path, 'wb') as f:
-                    iterations.tofile(f)
-                print(f"Debug: iterations saved to {iterations_out_path}")
-            else:
-                raise ValueError("iterations_out_path must be provided when get_detail_result is True")
+            # if iterations_out_path is not None:
+            #     with open(iterations_out_path, 'wb') as f:
+            #         iterations.tofile(f)
+            #     print(f"Debug: iterations saved to {iterations_out_path}")
+            # else:
+            #     raise ValueError("iterations_out_path must be provided when get_detail_result is True")
 
         else:
             predictions = observable_decoder.decode_observables_batch(
@@ -523,3 +528,27 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
         "msl-bp": SinterDecoder_MSLBP(**msl_config),  # type: ignore
         "harmonized-bp": SinterDecoder_HarmonizedBP(**harmonized_config),  # type: ignore
     }
+
+
+def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
+    """
+    decoder_specs: [{name: str, params: dict}]
+    Supports base relay/harmonized/mem/msl plus extra: bplsd, bposd.
+    """
+    built: dict[str, Decoder] = {}
+    for spec in decoder_specs:
+        name = spec.get("name")
+        params = spec.get("params", {}) or {}
+        if name in {"relay-bp", "mem-bp", "msl-bp", "harmonized-bp"}:
+            # Reuse sinter_decoders factory (single extraction)
+            built[name] = sinter_decoders(**params)[name]
+        elif name == "bposd":
+            built[name] = SinterBpOsdDecoder(**params)
+        elif name == "bplsd":
+            if SinterLsdDecoder is None:
+                raise ImportError("SinterLsdDecoder unavailable.")
+            built[name] = SinterLsdDecoder(**params)
+        else:
+            raise ValueError(f"Unknown decoder name: {name}")
+    return built
+
