@@ -280,4 +280,9 @@ pub struct EnsembleExtraResult {
     /// Effective ensemble iterations (max(child_iterations)) or +inf if any child failed
     #[serde(default)]    
     pub effective_iterations: Option<f64>,
+
+    pub selected_coset_avg_iter: Option<f64>,
+    pub runner_up_coset_avg_iter: Option<f64>,
+    pub selected_coset_votes: Option<usize>,     
+    pub runner_up_coset_votes: Option<usize>, 
 }

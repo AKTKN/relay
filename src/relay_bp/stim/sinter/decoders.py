@@ -40,6 +40,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
         get_detail: bool = False,
+        save_detail_path: Optional[pathlib.Path] = None,
     ):
         self.observable_decoder = observable_decoder
         self.parallel = parallel
@@ -47,6 +48,32 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
         self.get_detail = get_detail
+        
+        # 詳細情報を蓄積するためのバッファ
+        self.accumulated_details = {
+            'converged': [],
+            'logical_gaps': [],
+            'selected_coset_avg_iter': [],
+            'runner_up_coset_avg_iter': [],
+            'selected_coset_votes': [],
+            'runner_up_coset_votes': [],
+        }
+
+    def _save_accumulated_details(self):
+        if self.save_detail_path is None or not self.accumulated_details['converged']:
+            return
+        
+        # リストをNumPy配列に変換
+        data_to_save = {}
+        for key, values in self.accumulated_details.items():
+            # Noneを含む可能性があるため、object型配列として保存
+            data_to_save[key] = np.array(values, dtype=object)
+        
+        # NPZ形式で圧縮保存
+        self.save_detail_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(self.save_detail_path, **data_to_save)
+        print(f"Detailed metrics saved to: {self.save_detail_path}")
+
 
     def decode_shots_bit_packed(
         self,
@@ -63,6 +90,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         iterations = None
         converged = None
         logical_gaps = None
+        iter_deltas = None  
+        vote_deltas = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -75,6 +104,42 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             converged = np.array([res.converged for res in results])
             logical_gaps = np.array([res.logical_gap for res in results])
 
+            # 差分メトリックの計算
+            iter_deltas_list = []
+            vote_deltas_list = []
+
+            for res in results:
+                extra = res.extra
+                if extra is not None:
+                    selected_iter = extra.get('selected_coset_avg_iter')
+                    runner_up_iter = extra.get('runner_up_coset_avg_iter')
+                    selected_votes = extra.get('selected_coset_votes')
+                    runner_up_votes = extra.get('runner_up_coset_votes')
+
+                    print(f"Debug: selected_iter={selected_iter}, runner_up_iter={runner_up_iter}, selected_votes={selected_votes}, runner_up_votes={runner_up_votes}")
+                    
+                    # 差分を計算 (runner_up - selected)
+                    if runner_up_iter is not None and selected_iter is not None:
+                        iter_delta = runner_up_iter - selected_iter
+                    else:
+                        iter_delta = None
+                    
+                    if runner_up_votes is not None and selected_votes is not None:
+                        vote_delta = runner_up_votes - selected_votes
+                    else:
+                        vote_delta = None
+                    
+                    iter_deltas_list.append(iter_delta)
+                    vote_deltas_list.append(vote_delta)
+                else:
+                    print("Warning: Extra result is None, cannot compute deltas.")
+                    iter_deltas_list.append(None)
+                    vote_deltas_list.append(None)
+
+            # NumPy配列に変換（Noneを含むためobject型）
+            iter_deltas = np.array(iter_deltas_list, dtype=object)
+            vote_deltas = np.array(vote_deltas_list, dtype=object)
+
             # Try to use effective_iterations from ensemble extra if available
             extra = results[0].extra
             if extra is not None and extra.get("effective_iterations") is not None:
@@ -85,7 +150,6 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     res.extra["effective_iterations"] if res.extra is not None else float(res.iterations)
                     for res in results
                 ], dtype=float)
-
             else:
                 # Fallback to regular iterations with inf for non-converged
                 iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
@@ -104,9 +168,14 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
         if self.get_detail:
-            return outputs, iterations, converged, logical_gaps
+            return outputs, iterations, converged, logical_gaps, iter_deltas, vote_deltas
         else:
             return outputs
+
+    def __del__(self):
+        """デストラクタで蓄積したデータを保存"""
+        if hasattr(self, 'save_detail_path') and self.save_detail_path is not None:
+            self._save_accumulated_details()
 
 
 class SinterDecoder_BaseBP(Decoder):
@@ -250,7 +319,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
-        get_detail: bool = False    # if True, return detailed decoding info
+        get_detail: bool = False,    # if True, return detailed decoding info
     ):
         """Class for decoding stim circuits with the harmonized BP ensemble decoder."""
         self.alpha = alpha

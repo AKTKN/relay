@@ -113,6 +113,10 @@ impl Decoder for EnsembleDecoder{
                 child_iterations,
                 child_success,
                 effective_iterations: Some(effective_iterations),
+                selected_coset_avg_iter: None,
+                runner_up_coset_avg_iter: None,
+                selected_coset_votes: None,
+                runner_up_coset_votes: None,
             });
             return res;
         }
@@ -123,7 +127,7 @@ impl Decoder for EnsembleDecoder{
         let log_priors = self.original_log_priors.as_ref().expect("original_log_priors is required for decoding.");
 
         // This HashMap will store (DecodeResult, llrCost) tuples, keyed by logical_error
-        let mut coset_groups: HashMap<Array1<Bit>, Vec<(DecodeResult, f64)>> = HashMap::new();
+        let mut coset_groups: HashMap<Array1<Bit>, Vec<(DecodeResult, f64, usize)>> = HashMap::new();
 
         // Calculate LLR costs and group results by coset
         for result in converged_results {
@@ -132,103 +136,57 @@ impl Decoder for EnsembleDecoder{
                 .filter(|(&c, _)| c == 1)
                 .map(|(_, &llr_val)| llr_val)
                 .sum::<f64>();
-            coset_groups.entry(logical_error).or_default().push((result, llr_cost));
+            let iter = result.iterations;
+            coset_groups.entry(logical_error).or_default().push((result, llr_cost, iter));
         }
 
-        // Find the minimum LLR within each coset
-        let coset_min_llrs: HashMap<Array1<Bit>, (DecodeResult, f64)> = coset_groups.iter()
-            .map(|(coset, results_in_coset)| {
-                let (best_result, min_llr) = results_in_coset.iter()
-                    .min_by(|(_, llr_a), (_, llr_b)| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(r, l)| (r.clone(), *l))
-                    .unwrap(); // This unwrap is safe because the vector is never empty
-                (coset.clone(), (best_result, min_llr))
-            })
-            .collect();
+        // Find the minimum LLR within each coset and calculate statistics
+        let mut coset_stats: HashMap<Array1<Bit>, (DecodeResult, f64, f64, usize)> = HashMap::new();
+        
+        for (coset, results_in_coset) in coset_groups.iter() {
+            let (best_result, min_llr) = results_in_coset.iter()
+                .min_by(|(_, llr_a, _), (_, llr_b, _)| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(r, l, _)| (r.clone(), *l))
+                .unwrap();
+            
+            // Calculate average iteration for this coset
+            let avg_iter = results_in_coset.iter()
+                .map(|(_, _, iter)| *iter as f64)
+                .sum::<f64>() / results_in_coset.len() as f64;
+            
+            let vote_count = results_in_coset.len();
+            
+            coset_stats.insert(coset.clone(), (best_result, min_llr, avg_iter, vote_count));
+        }
 
         // 2. Select the final correction based on the chosen strategy
-        match self.strategy{
-            // --- MostLikely Strategy ---
-            SelectionStrategy::MostLikely =>{
-                // Find the result with the overall minimum LLR cost.
-                let (final_coset, (mut final_result, llr_final)) = coset_min_llrs.iter()
-                    .min_by(|(_, (_, llr_a)), (_, (_, llr_b))| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(c, (r, l))| (c.clone(), (r.clone(), *l)))
+        match self.strategy {
+            SelectionStrategy::MostLikely => {
+                // Find the result with the overall minimum LLR cost
+                let (final_coset, (mut final_result, llr_final, selected_avg_iter, selected_votes)) = coset_stats.iter()
+                    .min_by(|(_, (_, llr_a, _, _)), (_, (_, llr_b, _, _))| 
+                        llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(c, (r, l, avg_i, votes))| (c.clone(), (r.clone(), *l, *avg_i, *votes)))
                     .expect("No converged results to compare for MostLikely strategy.");
 
-                // Find the next smallest LLR from a *different* coset.
-                let llr_next_best = coset_min_llrs.iter()
+                // Find the next smallest LLR from a *different* coset
+                let runner_up = coset_stats.iter()
                     .filter(|(coset, _)| *coset != &final_coset)
-                    .map(|(_, (_, llr))| *llr)
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    .min_by(|(_, (_, llr_a, _, _)), (_, (_, llr_b, _, _))| 
+                        llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal));
 
-                let soft_information = if let Some(next_llr) = llr_next_best {
-                    next_llr - llr_final
+                let (soft_information, runner_up_avg_iter, runner_up_votes) = if let Some((_, (_, next_llr, runner_avg_iter, runner_votes))) = runner_up {
+                    let gap = next_llr - llr_final;
+                    (gap, Some(*runner_avg_iter), Some(*runner_votes))
                 } else {
-                    f64::INFINITY // All results were in the same coset
+                    (f64::INFINITY, None, None)
                 };
 
-                // TODO: Add soft_information to the DecodeResult struct later
-                // println!("[MostLikely] Soft Information: {}", soft_information);
+                // eprintln!("[Ensemble Debug] selected_avg_iter: {}", selected_avg_iter);
+                // eprintln!("[Ensemble Debug] runner_up_avg_iter: {:?}", runner_up_avg_iter);
+                // eprintln!("[Ensemble Debug] selected_votes: {}", selected_votes);
+                // eprintln!("[Ensemble Debug] runner_up_votes: {:?}", runner_up_votes);
 
-                final_result.logical_gap = Some(soft_information);
-
-                // --- build ensemble extras for downstream consumers ---
-                // Recompute on all children to store full arrays
-                let all_corrections = {
-                    // We no longer have the original `results` Vec<DecodeResult> here (moved).
-                    // We can use data from coset_groups and final_result plus child counts,
-                    // but for completeness, we store only converged representatives here.
-                    // If you need all children, move computations earlier and clone as needed.
-                    // For now, leave empty to avoid heavy clones of moved values.
-                    Vec::new()
-                };
-                let llr_sums = Vec::new();
-                let cosets = Vec::new();
-
-                // Try to find selected index among converged representatives (fallback 0)
-                let selected_index = 0usize;
-
-                final_result.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
-                    all_corrections,
-                    llr_sums,
-                    cosets,
-                    selected_index,
-                    child_iterations,
-                    child_success,
-                    effective_iterations: Some(effective_iterations),
-                });
-
-                final_result
-            }
-            
-            // --- MajorityVote Strategy ---
-            SelectionStrategy::MajorityVote => {
-                // Find the winning coset (the one with the most votes)
-                let (winning_coset, _) = coset_groups.iter()
-                    .max_by_key(|(_, v)| v.len())
-                    .map(|(c, v)| (c.clone(), v.len()))
-                    .expect("No converged results to vote on for MajorityVote strategy.");
-
-                // Get the best result from the winning coset
-                let (mut final_result, llr_final) = coset_min_llrs.get(&winning_coset).unwrap().clone();
-
-                // Find the second most voted coset
-                let second_coset = coset_groups.iter()
-                    .filter(|(coset, _)| *coset != &winning_coset)
-                    .max_by_key(|(_, v)| v.len());
-
-                let soft_information = if let Some((second_coset_key, _)) = second_coset {
-                    // Get the minimum LLR from the second winning coset
-                    let (_, llr_next_best) = coset_min_llrs.get(second_coset_key).unwrap();
-                    *llr_next_best - llr_final
-                } else {
-                    f64::INFINITY // Only one coset was found
-                };
-
-                // TODO: Add soft_information to the DecodeResult struct later
-                // println!("[MajorityVote] Soft Information: {}", soft_information);
-                
                 final_result.logical_gap = Some(soft_information);
 
                 final_result.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
@@ -239,6 +197,49 @@ impl Decoder for EnsembleDecoder{
                     child_iterations,
                     child_success,
                     effective_iterations: Some(effective_iterations),
+                    selected_coset_avg_iter: Some(selected_avg_iter),
+                    runner_up_coset_avg_iter: runner_up_avg_iter,
+                    selected_coset_votes: Some(selected_votes),
+                    runner_up_coset_votes: runner_up_votes,
+                });
+
+                final_result
+            }
+            
+            // --- MajorityVote Strategy ---
+            SelectionStrategy::MajorityVote => {
+                // Find the winning coset (the one with the most votes)
+                let (winning_coset, (mut final_result, llr_final, selected_avg_iter, selected_votes)) = coset_stats.iter()
+                    .max_by_key(|(_, (_, _, _, votes))| *votes)
+                    .map(|(c, (r, l, avg_i, votes))| (c.clone(), (r.clone(), *l, *avg_i, *votes)))
+                    .expect("No converged results to vote on for MajorityVote strategy.");
+
+                // Find the second most voted coset
+                let runner_up = coset_stats.iter()
+                    .filter(|(coset, _)| *coset != &winning_coset)
+                    .max_by_key(|(_, (_, _, _, votes))| *votes);
+
+                let (soft_information, runner_up_avg_iter, runner_up_votes) = if let Some((_, (_, runner_llr, runner_avg_iter, runner_votes))) = runner_up {
+                    let gap = *runner_llr - llr_final;
+                    (gap, Some(*runner_avg_iter), Some(*runner_votes))
+                } else {
+                    (f64::INFINITY, None, None)
+                };
+
+                final_result.logical_gap = Some(soft_information);
+
+                final_result.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
+                    all_corrections: Vec::new(),
+                    llr_sums: Vec::new(),
+                    cosets: Vec::new(),
+                    selected_index: 0,
+                    child_iterations,
+                    child_success,
+                    effective_iterations: Some(effective_iterations),
+                    selected_coset_avg_iter: Some(selected_avg_iter),
+                    runner_up_coset_avg_iter: runner_up_avg_iter,
+                    selected_coset_votes: Some(selected_votes),
+                    runner_up_coset_votes: runner_up_votes,
                 });
 
                 final_result

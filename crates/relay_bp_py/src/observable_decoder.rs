@@ -108,6 +108,11 @@ impl ObservableDecodeResult {
                 relay_bp::decoder::BPExtraResult::None => Ok(py.None()),
                 relay_bp::decoder::BPExtraResult::Ensemble(ensemble_extra) => {
                     let dict = PyDict::new(py);
+
+                    eprintln!("[Rust Debug] selected_coset_avg_iter: {:?}", ensemble_extra.selected_coset_avg_iter);
+                    eprintln!("[Rust Debug] runner_up_coset_avg_iter: {:?}", ensemble_extra.runner_up_coset_avg_iter);
+                    eprintln!("[Rust Debug] selected_coset_votes: {:?}", ensemble_extra.selected_coset_votes);
+                    eprintln!("[Rust Debug] runner_up_coset_votes: {:?}", ensemble_extra.runner_up_coset_votes);
                     
                     // all_corrections as list of numpy arrays
                     let corrections_list: Vec<_> = ensemble_extra
@@ -115,10 +120,10 @@ impl ObservableDecodeResult {
                         .iter()
                         .map(|arr| PyArray1::from_array(py, arr).into_py(py))
                         .collect();
-                    dict.set_item("all_corrections", corrections_list)?;
+                    dict.set_item("all_corrections", corrections_list)?;  //empty now
                     
                     // llr_sums as list of floats
-                    dict.set_item("llr_sums", ensemble_extra.llr_sums.clone())?;
+                    dict.set_item("llr_sums", ensemble_extra.llr_sums.clone())?;  //empty now
                     
                     // cosets as list of numpy arrays
                     let cosets_list: Vec<_> = ensemble_extra
@@ -126,12 +131,16 @@ impl ObservableDecodeResult {
                         .iter()
                         .map(|arr| PyArray1::from_array(py, arr).into_py(py))
                         .collect();
-                    dict.set_item("cosets", cosets_list)?;
+                    dict.set_item("cosets", cosets_list)?;  //empty now
                     
                     dict.set_item("selected_index", ensemble_extra.selected_index)?;
                     dict.set_item("child_iterations", ensemble_extra.child_iterations.clone())?;
                     dict.set_item("child_success", ensemble_extra.child_success.clone())?;
                     dict.set_item("effective_iterations", ensemble_extra.effective_iterations)?;
+                    dict.set_item("selected_coset_avg_iter", ensemble_extra.selected_coset_avg_iter)?;
+                    dict.set_item("runner_up_coset_avg_iter", ensemble_extra.runner_up_coset_avg_iter)?;
+                    dict.set_item("selected_coset_votes", ensemble_extra.selected_coset_votes)?;
+                    dict.set_item("runner_up_coset_votes", ensemble_extra.runner_up_coset_votes)?;
                     
                     Ok(dict.into())
                 }
