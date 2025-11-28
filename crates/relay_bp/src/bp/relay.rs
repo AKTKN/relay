@@ -189,7 +189,11 @@ where
         let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
         
         let repulsive_uniform = if let Some((rep_low, rep_high)) = relay_config.repulsive_gamma_dist {
-            Some(Uniform::new(rep_low, rep_high))
+            if (rep_low - rep_high).abs() < 1e-12{
+                None
+            } else{
+                Some(Uniform::new(rep_low, rep_high))
+            }
         } else {
             None
         };
@@ -245,23 +249,28 @@ where
         // Get current posterior ratios (LLR values) from BP decoder
         let posterior_ratios = self.bp_decoder.get_posterior_ratios_f64();
         let abs_llr_threshold = self.relay_config.abs_llr_threshold.unwrap_or(2.0);
+
+        let repulsive_fixed_value = self.relay_config.repulsive_gamma_dist.map(|(low, _)| low);
         
         // Determine which distribution to use for each variable
-        let has_repulsive_dist = self.posterior_update_state.repulsive_uniform.is_some();
+        // let has_repulsive_dist = self.posterior_update_state.repulsive_uniform.is_some();
         
         for i in 0..gammas.len() {
             let abs_llr = posterior_ratios[i].abs();
             
-            // If LLR exceeds threshold and repulsive distribution is available, use repulsive gamma
-            if has_repulsive_dist && abs_llr > abs_llr_threshold {
-                gammas[i] = self
-                    .posterior_update_state
-                    .repulsive_uniform
-                    .as_ref()
-                    .unwrap()
-                    .sample(&mut self.posterior_update_state.rng_std);
+            if abs_llr > abs_llr_threshold {
+                // repulsive_uniform がある場合はサンプリング、ない場合は固定値
+                gammas[i] = if let Some(ref dist) = self.posterior_update_state.repulsive_uniform {
+                    dist.sample(&mut self.posterior_update_state.rng_std)
+                } else if let Some(fixed_val) = repulsive_fixed_value {
+                    fixed_val  // ← 固定値を使う
+                } else {
+                    // repulsive_gamma_dist 自体が None の場合は通常の gamma を使う
+                    self.posterior_update_state
+                        .uniform
+                        .sample(&mut self.posterior_update_state.rng_std)
+                };
             } else {
-                // Otherwise use normal gamma distribution
                 gammas[i] = self
                     .posterior_update_state
                     .uniform
