@@ -6,6 +6,41 @@ use ndarray::{Array1, ArrayView1}; use core::f64;
 use std::sync::Arc; // Smart pointer for shared owenership, this is useful for sharing data like chack matrices across multiple decoders.
 use ndarray::s;
 
+/// Ensemble decoder mode
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnsembleMode {
+    Normal,
+    Repulsive,
+}
+
+impl Default for EnsembleMode {
+    fn default() -> Self {
+        EnsembleMode::Normal
+    }
+}
+
+/// Configuration for repulsive mode
+#[derive(Clone, Debug)]
+pub struct RepulsiveConfig {
+    pub repulsive_size: usize,           // Number of decoders to use repulsive mode
+    pub repulsive_gamma_dist: (f64, f64), // Gamma distribution range for repulsive mode
+    pub abs_llr_threshold: f64,           // Absolute LLR threshold for applying repulsive gamma
+    pub pulse_per_leg: usize,             // Apply repulsive every N legs
+    pub start_leg: usize,                 // Start applying repulsive from this leg (0 = after pre_iter)
+}
+
+impl Default for RepulsiveConfig {
+    fn default() -> Self {
+        Self {
+            repulsive_size: 0,
+            repulsive_gamma_dist: (-0.5, -0.1),
+            abs_llr_threshold: 2.0,
+            pulse_per_leg: 1,
+            start_leg: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelectionStrategy{
     MostLikely,
@@ -30,6 +65,8 @@ pub struct EnsembleDecoder{
     strategy: SelectionStrategy,
     original_log_priors: Option<Arc<Array1<f64>>>,
     observable_matrix: Option<Arc<SparseBitMatrix>>,
+    mode: EnsembleMode,
+    repulsive_config: Option<Arc<RepulsiveConfig>>,
 }
 
 // Implement the constructer for EnsembleDecoder
@@ -57,6 +94,47 @@ impl EnsembleDecoder{
             strategy,
             original_log_priors,
             observable_matrix,
+            mode: EnsembleMode::Normal,
+            repulsive_config: None,
+        } 
+    }
+
+    /// Create a new EnsembleDecoder with mode configuration
+    pub fn new_with_mode(
+        decoders: Vec<Box<dyn Decoder + Send>>,
+        strategy: SelectionStrategy,
+        original_log_priors: Option<Arc<Array1<f64>>>,
+        observable_matrix: Option<Arc<SparseBitMatrix>>,
+        mode: EnsembleMode,
+        repulsive_config: Option<Arc<RepulsiveConfig>>,
+    ) -> Self{
+        if decoders.is_empty(){
+            panic!("EnsembleDecoder requires at least one decoder.");
+        }
+        // 戦略と必要な情報が一致しているか簡単なチェック
+        if strategy == SelectionStrategy::MostLikely && original_log_priors.is_none() {
+            panic!("'MostLikely' strategy requires original_log_priors.");
+        }
+        if strategy == SelectionStrategy::MajorityVote && observable_matrix.is_none() {
+            panic!("'MajorityVote' strategy requires observable_matrix.");
+        }
+        // Repulsiveモードの検証
+        if mode == EnsembleMode::Repulsive && repulsive_config.is_none() {
+            panic!("Repulsive mode requires repulsive_config.");
+        }
+        if let Some(ref config) = repulsive_config {
+            if config.repulsive_size > decoders.len() {
+                panic!("repulsive_size cannot exceed the number of decoders.");
+            }
+        }
+
+        Self { 
+            decoders,
+            strategy,
+            original_log_priors,
+            observable_matrix,
+            mode,
+            repulsive_config,
         } 
     }
 }

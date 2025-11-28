@@ -16,7 +16,7 @@ use relay_bp::observable_decoder::{
     ObservableDecodeResult as ObservableDecodeResultInner, ObservableDecoder,
     ObservableDecoderRunner as ObservableDecoderRunnerInner,
 };
-use relay_bp::ensemble_decoder::{EnsembleDecoder, SelectionStrategy};
+use relay_bp::ensemble_decoder::{EnsembleDecoder, SelectionStrategy, EnsembleMode, RepulsiveConfig};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::relay::{RelayDecoder, RelayDecoderConfig, StoppingCriterion};
 use relay_bp::decoder::{Decoder, AutomorphismWrapperDecoder, SparseBitMatrix};
@@ -109,10 +109,10 @@ impl ObservableDecodeResult {
                 relay_bp::decoder::BPExtraResult::Ensemble(ensemble_extra) => {
                     let dict = PyDict::new(py);
 
-                    eprintln!("[Rust Debug] selected_coset_avg_iter: {:?}", ensemble_extra.selected_coset_avg_iter);
-                    eprintln!("[Rust Debug] runner_up_coset_avg_iter: {:?}", ensemble_extra.runner_up_coset_avg_iter);
-                    eprintln!("[Rust Debug] selected_coset_votes: {:?}", ensemble_extra.selected_coset_votes);
-                    eprintln!("[Rust Debug] runner_up_coset_votes: {:?}", ensemble_extra.runner_up_coset_votes);
+                    // eprintln!("[Rust Debug] selected_coset_avg_iter: {:?}", ensemble_extra.selected_coset_avg_iter);
+                    // eprintln!("[Rust Debug] runner_up_coset_avg_iter: {:?}", ensemble_extra.runner_up_coset_avg_iter);
+                    // eprintln!("[Rust Debug] selected_coset_votes: {:?}", ensemble_extra.selected_coset_votes);
+                    // eprintln!("[Rust Debug] runner_up_coset_votes: {:?}", ensemble_extra.runner_up_coset_votes);
                     
                     // all_corrections as list of numpy arrays
                     let corrections_list: Vec<_> = ensemble_extra
@@ -187,7 +187,8 @@ impl ObservableDecoderRunner {
     #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
         set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
         stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), 
-        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=None))]
+        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=None,
+        ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn with_ensemble_decoder(
         py: Python<'_>,
@@ -214,6 +215,12 @@ impl ObservableDecoderRunner {
         col_permutations: Option<&Bound<'_, PyAny>>,
         row_permutations: Option<&Bound<'_, PyAny>>,
         seed: Option<u64>,
+        ensemble_mode: String,
+        repulsive_size: usize,
+        repulsive_gamma_dist: Option<(f64, f64)>,
+        abs_llr_threshold: Option<f64>,
+        pulse_per_leg: Option<usize>,
+        start_leg: Option<usize>,
     ) -> PyResult<Self> {
         // 1. Setyp parameters for child decoders
         let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
@@ -254,6 +261,10 @@ impl ObservableDecoderRunner {
             pre_iter, num_sets, set_max_iter, gamma_dist_interval,
             explicit_gammas: explicit_gammas.map(|arr| arr.as_array().to_owned()),
             stopping_criterion: stopping_criterion_template, logging, seed,
+            repulsive_gamma_dist: None,  // Will be set per-decoder based on mode
+            abs_llr_threshold: None,
+            pulse_per_leg: None,
+            start_leg: None,
         };   
 
         // Perturb error priors 
@@ -262,6 +273,8 @@ impl ObservableDecoderRunner {
 
         // Create child decoders 
         for i in 0..ensemble_size {
+            // Determine if this decoder should use repulsive mode
+            let use_repulsive = i < repulsive_size;
             // Generate a random perturbation strongness within the specified range
             // let alpha_perturb = if perturbation_min < perturbation_max {
             //     rng.gen_range(perturbation_min..perturbation_max)
@@ -323,6 +336,14 @@ impl ObservableDecoderRunner {
             // Create RelayDecoderConfig
             let mut relay_config = relay_config_templete.clone();
             relay_config.seed = seed + i as u64;
+            
+            // Apply repulsive mode settings if this is a repulsive decoder
+            if use_repulsive {
+                relay_config.repulsive_gamma_dist = repulsive_gamma_dist;
+                relay_config.abs_llr_threshold = abs_llr_threshold;
+                relay_config.pulse_per_leg = pulse_per_leg;
+                relay_config.start_leg = start_leg;
+            }
 
             // Create child decoder
             let relay_decoder = Box::new(RelayDecoder::<f64>::new(
@@ -349,11 +370,32 @@ impl ObservableDecoderRunner {
         let original_log_priors = error_priors_owned.mapv(|p| ((1.0 - p)/p).ln());
         let original_log_priors_arc = Arc::new(original_log_priors);
 
-        let ensemble_decoder = EnsembleDecoder::new(
+        // Parse ensemble mode
+        let mode = match ensemble_mode.to_lowercase().as_str() {
+            "repulsive" => EnsembleMode::Repulsive,
+            "normal" | _ => EnsembleMode::Normal,
+        };
+
+        // Create RepulsiveConfig if in repulsive mode
+        let repulsive_config_arc = if mode == EnsembleMode::Repulsive {
+            Some(Arc::new(RepulsiveConfig {
+                repulsive_size,
+                repulsive_gamma_dist: repulsive_gamma_dist.unwrap_or((-0.5, -0.1)),
+                abs_llr_threshold: abs_llr_threshold.unwrap_or(2.0),
+                pulse_per_leg: pulse_per_leg.unwrap_or(1),
+                start_leg: start_leg.unwrap_or(0),
+            }))
+        } else {
+            None
+        };
+
+        let ensemble_decoder = EnsembleDecoder::new_with_mode(
             child_decoders,
             strategy,
             Some(original_log_priors_arc),
             Some(obs_matrix_arc.clone()),
+            mode,
+            repulsive_config_arc,
         );
 
         // 4. 生成したEnsembleDecoderを使い、自分自身(ObservableDecoderRunner)のインスタンスを生成して返す

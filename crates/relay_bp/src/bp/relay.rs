@@ -48,6 +48,11 @@ pub struct RelayDecoderConfig {
     pub stopping_criterion: StoppingCriterion,
     pub logging: bool,
     pub seed: u64,
+    // Repulsive mode parameters
+    pub repulsive_gamma_dist: Option<(f64, f64)>,
+    pub abs_llr_threshold: Option<f64>,
+    pub pulse_per_leg: Option<usize>,
+    pub start_leg: Option<usize>,
 }
 
 impl Default for RelayDecoderConfig {
@@ -61,6 +66,10 @@ impl Default for RelayDecoderConfig {
             stopping_criterion: StoppingCriterion::default(),
             logging: false,
             seed: 0,
+            repulsive_gamma_dist: None,
+            abs_llr_threshold: None,
+            pulse_per_leg: None,
+            start_leg: None,
         }
     }
 }
@@ -69,6 +78,7 @@ impl Default for RelayDecoderConfig {
 struct PosteriorUpdateState {
     rng_std: rand::rngs::StdRng,
     uniform: rand::distributions::Uniform<f64>,
+    repulsive_uniform: Option<rand::distributions::Uniform<f64>>,
 }
 
 /// An ensemble decoder which controls an inner BP min-sum decoder.
@@ -177,7 +187,14 @@ where
         let low = relay_config.gamma_dist_interval.0;
         let high = relay_config.gamma_dist_interval.1;
         let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
-        PosteriorUpdateState { rng_std, uniform }
+        
+        let repulsive_uniform = if let Some((rep_low, rep_high)) = relay_config.repulsive_gamma_dist {
+            Some(Uniform::new(rep_low, rep_high))
+        } else {
+            None
+        };
+        
+        PosteriorUpdateState { rng_std, uniform, repulsive_uniform }
     }
 
     fn init_next_set(&mut self, set_idx: usize) {
@@ -203,6 +220,77 @@ where
                 .sample(&mut self.posterior_update_state.rng_std);
         }
         self.bp_decoder.set_memory_strengths_f64(gammas);
+    }
+
+    /// Initialize next set with repulsive mode: assigns repulsive gammas to high-LLR positions
+    fn init_repulsive_set(&mut self, set_idx: usize) {
+        let mut gammas = Array1::zeros(self.check_matrix().cols());
+        
+        if self.relay_config.explicit_gammas.is_some() {
+            // If explicit gammas are specified, use them as in normal mode
+            let gammas_num_sets = self.relay_config.explicit_gammas.as_ref().unwrap().shape()[0];
+            for i in 0..gammas.len() {
+                gammas[i] = *self
+                    .relay_config
+                    .explicit_gammas
+                    .as_ref()
+                    .unwrap()
+                    .get((set_idx % gammas_num_sets, i))
+                    .unwrap();
+            }
+            self.bp_decoder.set_memory_strengths_f64(gammas);
+            return;
+        }
+
+        // Get current posterior ratios (LLR values) from BP decoder
+        let posterior_ratios = self.bp_decoder.get_posterior_ratios_f64();
+        let abs_llr_threshold = self.relay_config.abs_llr_threshold.unwrap_or(2.0);
+        
+        // Determine which distribution to use for each variable
+        let has_repulsive_dist = self.posterior_update_state.repulsive_uniform.is_some();
+        
+        for i in 0..gammas.len() {
+            let abs_llr = posterior_ratios[i].abs();
+            
+            // If LLR exceeds threshold and repulsive distribution is available, use repulsive gamma
+            if has_repulsive_dist && abs_llr > abs_llr_threshold {
+                gammas[i] = self
+                    .posterior_update_state
+                    .repulsive_uniform
+                    .as_ref()
+                    .unwrap()
+                    .sample(&mut self.posterior_update_state.rng_std);
+            } else {
+                // Otherwise use normal gamma distribution
+                gammas[i] = self
+                    .posterior_update_state
+                    .uniform
+                    .sample(&mut self.posterior_update_state.rng_std);
+            }
+        }
+        
+        self.bp_decoder.set_memory_strengths_f64(gammas);
+    }
+
+    /// Check if repulsive mode should be applied for the given set index
+    fn should_apply_repulsive(&self, set_idx: usize) -> bool {
+        // Check if repulsive parameters are configured
+        if self.relay_config.repulsive_gamma_dist.is_none() {
+            return false;
+        }
+        
+        let start_leg = self.relay_config.start_leg.unwrap_or(0);
+        let pulse_per_leg = self.relay_config.pulse_per_leg.unwrap_or(1);
+        
+        // set_idx starts from 1 (after pre_iter), so we need to adjust
+        // set_idx = 1 means first leg after pre_iter
+        if set_idx < start_leg + 1 {
+            return false;
+        }
+        
+        // Apply repulsive every pulse_per_leg legs
+        let leg_offset = set_idx - 1; // Convert to 0-based leg index
+        (leg_offset - start_leg) % pulse_per_leg == 0
     }
 
     /// Decode with the inner decoder
@@ -345,7 +433,14 @@ where
         for set in 1..=self.relay_config.num_sets {
             // Do not completely initialize decoder as we wish to relay
             // posterior marginals with new memory strengths.
-            self.init_next_set(set);
+            
+            // Determine whether to apply repulsive mode for this set
+            if self.should_apply_repulsive(set) {
+                self.init_repulsive_set(set);
+            } else {
+                self.init_next_set(set);
+            }
+            
             self.bp_decoder.current_iteration = 0;
             self.bp_decoder.initialize_check_to_variable();
             self.bp_decoder.initialize_variable_to_check();

@@ -15,3 +15,6 @@ pub mod dem;
 pub mod ensemble_decoder;
 pub mod observable_decoder;
 pub mod utilities;
+
+// Re-export ensemble types for easier access
+pub use ensemble_decoder::{EnsembleMode, RepulsiveConfig};

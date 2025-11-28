@@ -553,6 +553,13 @@ where
         self.get_detectors(self.decoding.view())
     }
 
+    /// Get current posterior ratios as f64 array (for LLR-based decisions)
+    pub fn get_posterior_ratios_f64(&self) -> Array1<f64> {
+        self.posterior_ratios.iter()
+            .map(|&val| val.to_f64().unwrap_or(0.0))
+            .collect()
+    }
+
     // Check the convergence of the problem instance
     pub fn check_convergence(
         &self,

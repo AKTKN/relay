@@ -28,7 +28,7 @@ macro_rules! create_bp_interface {
             #[new]
             #[pyo3(signature = (check_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
                 set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
-                stopping_criterion="nconv".to_string(), logging=false, seed=0))]
+                stopping_criterion="nconv".to_string(), logging=false, seed=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None))]
             #[allow(clippy::missing_transmute_annotations, clippy::too_many_arguments)]
             pub fn new(
                 py: Python<'_>,
@@ -48,6 +48,10 @@ macro_rules! create_bp_interface {
                 stopping_criterion: String,
                 logging: bool,
                 seed: u64,
+                repulsive_gamma_dist: Option<(f64, f64)>,
+                abs_llr_threshold: Option<f64>,
+                pulse_per_leg: Option<usize>,
+                start_leg: Option<usize>,
             ) -> PyResult<(Self, DynDecoder)> {
                 let min_sum_decoder = Self {};
 
@@ -82,6 +86,10 @@ macro_rules! create_bp_interface {
                     stopping_criterion,
                     logging,
                     seed,
+                    repulsive_gamma_dist,
+                    abs_llr_threshold,
+                    pulse_per_leg,
+                    start_leg,
                 };
 
                 let inner_decoder = RelayDecoder::<$type>::new(

@@ -116,7 +116,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     selected_votes = extra.get('selected_coset_votes')
                     runner_up_votes = extra.get('runner_up_coset_votes')
 
-                    print(f"Debug: selected_iter={selected_iter}, runner_up_iter={runner_up_iter}, selected_votes={selected_votes}, runner_up_votes={runner_up_votes}")
+                    # print(f"Debug: selected_iter={selected_iter}, runner_up_iter={runner_up_iter}, selected_votes={selected_votes}, runner_up_votes={runner_up_votes}")
                     
                     # 差分を計算 (runner_up - selected)
                     if runner_up_iter is not None and selected_iter is not None:
@@ -314,6 +314,13 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         perturbation_max: float = 0.0,
         # --- For automorphism ---
         use_automorphism: bool = False,
+        # --- For repulsive mode ---
+        ensemble_mode = "normal",
+        repulsive_size: int = 0,
+        repulsive_gamma_dist: tuple[float, float] = None,
+        abs_llr_threshold: float = None,
+        pulse_per_leg: int = None,
+        start_leg: int = None,
         # --- BaseBP parameters ---
         parallel: bool = False,
         decomposed_hyperedges: bool | None = None,
@@ -337,6 +344,12 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
         self.use_automorphism = use_automorphism
+        self.ensemble_mode = ensemble_mode
+        self.repulsive_size = repulsive_size
+        self.repulsive_gamma_dist = tuple(repulsive_gamma_dist) 
+        self.abs_llr_threshold = abs_llr_threshold
+        self.pulse_per_leg = pulse_per_leg
+        self.start_leg = start_leg
         self.seed = np.random.randint(0, 2**32 - 1) if seed is None else seed
         self.get_detail = get_detail
 
@@ -405,7 +418,13 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             perturbation_max=self.perturbation_max,
             col_permutations=self.col_permutations,
             row_permutations=self.row_permutations,
-            seed=self.seed
+            seed=self.seed,
+            ensemble_mode=self.ensemble_mode,
+            repulsive_size=self.repulsive_size,
+            repulsive_gamma_dist=self.repulsive_gamma_dist,
+            abs_llr_threshold=self.abs_llr_threshold,
+            pulse_per_leg=self.pulse_per_leg,
+            start_leg=self.start_leg,
         )
 
         return observable_decoder
@@ -588,6 +607,12 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("perturbation_min", None)
     relay_config.pop("perturbation_max", None)
     relay_config.pop("use_automorphism", None)
+    relay_config.pop("ensemble_mode", None)
+    relay_config.pop("repulsive_size", None)
+    relay_config.pop("repulsive_gamma_dist", None)
+    relay_config.pop("abs_llr_threshold", None)
+    relay_config.pop("pulse_per_leg", None)
+    relay_config.pop("start_leg", None)
     # relay_config.pop("seed", None)
 
     return {
