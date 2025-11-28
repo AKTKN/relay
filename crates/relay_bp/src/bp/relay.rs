@@ -294,7 +294,9 @@ where
     }
 
     /// Decode with the inner decoder
-    fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize) -> DecodeResult {
+    /// If is_repulsive_leg is true, apply repulsive gamma only on the first iteration,
+    /// then switch to normal gamma for subsequent iterations
+    fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize, is_repulsive_leg: bool) -> DecodeResult {
 
         // if detectors.iter().all(|&d| d == 0){
         //     debug!("No detection events. Returning success immediately.");
@@ -304,7 +306,13 @@ where
         let mut success: bool = false;
         let mut decoded_detectors = Array1::default(detectors.dim());
 
-        for _ in 0..max_iter {
+        for iter in 0..max_iter {
+            // For repulsive legs: after first iteration, switch to normal gamma
+            if is_repulsive_leg && iter == 1 {
+                // Switch from repulsive to normal gamma after first iteration
+                self.apply_normal_gammas();
+            }
+            
             self.bp_decoder.run_iteration(detectors);
             decoded_detectors = self.bp_decoder.compute_decoded_detectors();
             success = self
@@ -324,6 +332,18 @@ where
 
         self.bp_decoder
             .build_result(success, decoded_detectors, max_iter)
+    }
+
+    /// Apply normal gammas sampled from gamma_dist_interval to all variables
+    fn apply_normal_gammas(&mut self) {
+        let mut gammas = Array1::zeros(self.check_matrix().cols());
+        for i in 0..gammas.len() {
+            gammas[i] = self
+                .posterior_update_state
+                .uniform
+                .sample(&mut self.posterior_update_state.rng_std);
+        }
+        self.bp_decoder.set_memory_strengths_f64(gammas);
     }
 
     fn write_log(&mut self, file: File) {
@@ -388,7 +408,7 @@ where
 
         // First Mem-BP
         self.bp_decoder.initialize_decoder();
-        let mut result = self.decode_inner(detectors, self.relay_config.pre_iter);
+        let mut result = self.decode_inner(detectors, self.relay_config.pre_iter, false);
         self.num_executed_sets = 1;
 
         // Create logging variables and log first set if applicable
@@ -435,7 +455,8 @@ where
             // posterior marginals with new memory strengths.
             
             // Determine whether to apply repulsive mode for this set
-            if self.should_apply_repulsive(set) {
+            let is_repulsive = self.should_apply_repulsive(set);
+            if is_repulsive {
                 self.init_repulsive_set(set);
             } else {
                 self.init_next_set(set);
@@ -444,7 +465,7 @@ where
             self.bp_decoder.current_iteration = 0;
             self.bp_decoder.initialize_check_to_variable();
             self.bp_decoder.initialize_variable_to_check();
-            let temp_result = self.decode_inner(detectors, self.relay_config.set_max_iter);
+            let temp_result = self.decode_inner(detectors, self.relay_config.set_max_iter, is_repulsive);
 
             self.num_executed_sets += 1;
             total_iterations += temp_result.iterations;
