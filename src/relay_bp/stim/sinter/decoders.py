@@ -87,6 +87,15 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         if self.check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + self.check_matrices.syndrome_bias) % 2
 
+        # In harmonized decoder, it calculates permutation of syndromes. 
+        # At that time, the dimension of checks and syndromes must be the same. 
+        # In decode_shots_bit_packed, the syndrome data is bit-packed, so its shape is a multiple of 8 (byte).
+        # Therefore, when the dimension of check matrix (row) is not a multiple of 8, 
+        # we need to slice the syndrome data to match the dimension.
+        num_checks = self.check_matrices.check_matrix.shape[0]
+        if syndromes.shape[1] > num_checks:
+            syndromes = syndromes[:, :num_checks]
+
         iterations = None
         converged = None
         logical_gaps = None
@@ -257,6 +266,8 @@ class SinterDecoder_BaseBP(Decoder):
         if check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + check_matrices.syndrome_bias) % 2
 
+
+
         if self.get_detail_result:
             results = observable_decoder.decode_observables_detailed_batch(
                 syndromes,
@@ -426,6 +437,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             pulse_per_leg=self.pulse_per_leg,
             start_leg=self.start_leg,
         )
+
 
         return observable_decoder
     
