@@ -798,7 +798,7 @@ mod tests {
                 pre_iter: 10,
                 num_sets: 3,
                 set_max_iter: 20,
-                gamma_dist_interval: (-0.25, 0.60),
+                gamma_dist_interval: (0.0, 0.0),
                 // gamma_dist_interval: (-2.25, -1.1),
                 seed: i,
                 ..Default::default()

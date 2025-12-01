@@ -186,7 +186,14 @@ where
         let rng_std: rand::prelude::StdRng = rand::rngs::StdRng::seed_from_u64(relay_config.seed);
         let low = relay_config.gamma_dist_interval.0;
         let high = relay_config.gamma_dist_interval.1;
-        let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
+        
+        // Only create Uniform distribution if low != high
+        let uniform: rand::distributions::Uniform<f64> = if (low - high).abs() < 1e-12 {
+            // For fixed gamma, create a dummy uniform distribution (won't be used)
+            Uniform::new(0.0, 1.0)
+        } else {
+            Uniform::new(low, high)
+        };
         
         let repulsive_uniform = if let Some((rep_low, rep_high)) = relay_config.repulsive_gamma_dist {
             if (rep_low - rep_high).abs() < 1e-12{
@@ -217,11 +224,20 @@ where
             self.bp_decoder.set_memory_strengths_f64(gammas);
             return;
         }
+        
+        // Check if gamma_dist_interval is a fixed value (low == high)
+        let (low, high) = self.relay_config.gamma_dist_interval;
+        let is_fixed = (low - high).abs() < 1e-12;
+        
         for i in 0..gammas.len() {
-            gammas[i] = self
-                .posterior_update_state
-                .uniform
-                .sample(&mut self.posterior_update_state.rng_std);
+            gammas[i] = if is_fixed {
+                low  // Use fixed value
+            } else {
+                self.posterior_update_state
+                    .uniform
+                    .sample(&mut self.posterior_update_state.rng_std)
+            };
+            // println!("gamma for var {}: {}", i, gammas[i]);
         }
         self.bp_decoder.set_memory_strengths_f64(gammas);
     }
@@ -252,6 +268,10 @@ where
 
         let repulsive_fixed_value = self.relay_config.repulsive_gamma_dist.map(|(low, _)| low);
         
+        // Check if normal gamma_dist_interval is a fixed value
+        let (normal_low, normal_high) = self.relay_config.gamma_dist_interval;
+        let normal_is_fixed = (normal_low - normal_high).abs() < 1e-12;
+        
         // Determine which distribution to use for each variable
         // let has_repulsive_dist = self.posterior_update_state.repulsive_uniform.is_some();
         
@@ -266,15 +286,22 @@ where
                     fixed_val  // ← 固定値を使う
                 } else {
                     // repulsive_gamma_dist 自体が None の場合は通常の gamma を使う
+                    if normal_is_fixed {
+                        normal_low
+                    } else {
+                        self.posterior_update_state
+                            .uniform
+                            .sample(&mut self.posterior_update_state.rng_std)
+                    }
+                };
+            } else {
+                gammas[i] = if normal_is_fixed {
+                    normal_low
+                } else {
                     self.posterior_update_state
                         .uniform
                         .sample(&mut self.posterior_update_state.rng_std)
                 };
-            } else {
-                gammas[i] = self
-                    .posterior_update_state
-                    .uniform
-                    .sample(&mut self.posterior_update_state.rng_std);
             }
         }
         
@@ -346,11 +373,19 @@ where
     /// Apply normal gammas sampled from gamma_dist_interval to all variables
     fn apply_normal_gammas(&mut self) {
         let mut gammas = Array1::zeros(self.check_matrix().cols());
+        
+        // Check if gamma_dist_interval is a fixed value (low == high)
+        let (low, high) = self.relay_config.gamma_dist_interval;
+        let is_fixed = (low - high).abs() < 1e-12;
+        
         for i in 0..gammas.len() {
-            gammas[i] = self
-                .posterior_update_state
-                .uniform
-                .sample(&mut self.posterior_update_state.rng_std);
+            gammas[i] = if is_fixed {
+                low  // Use fixed value
+            } else {
+                self.posterior_update_state
+                    .uniform
+                    .sample(&mut self.posterior_update_state.rng_std)
+            };
         }
         self.bp_decoder.set_memory_strengths_f64(gammas);
     }
