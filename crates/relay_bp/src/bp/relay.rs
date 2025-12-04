@@ -278,7 +278,8 @@ where
         for i in 0..gammas.len() {
             let abs_llr = posterior_ratios[i].abs();
             
-            if abs_llr > abs_llr_threshold {
+            // Apply repulsive gamma to variables with abs(LLR) <= threshold
+            if abs_llr <= abs_llr_threshold {
                 // repulsive_uniform がある場合はサンプリング、ない場合は固定値
                 gammas[i] = if let Some(ref dist) = self.posterior_update_state.repulsive_uniform {
                     dist.sample(&mut self.posterior_update_state.rng_std)
