@@ -331,8 +331,7 @@ where
     }
 
     /// Decode with the inner decoder
-    /// If is_repulsive_leg is true, apply repulsive gamma only on the first iteration,
-    /// then switch to normal gamma for subsequent iterations
+    /// If is_repulsive_leg is true, apply repulsive gamma for the entire leg
     fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize, is_repulsive_leg: bool) -> DecodeResult {
 
         // if detectors.iter().all(|&d| d == 0){
@@ -344,12 +343,6 @@ where
         let mut decoded_detectors = Array1::default(detectors.dim());
 
         for iter in 0..max_iter {
-            // For repulsive legs: after first iteration, switch to normal gamma
-            if is_repulsive_leg && iter == 1 {
-                // Switch from repulsive to normal gamma after first iteration
-                self.apply_normal_gammas();
-            }
-            
             self.bp_decoder.run_iteration(detectors);
             decoded_detectors = self.bp_decoder.compute_decoded_detectors();
             success = self
@@ -369,26 +362,6 @@ where
 
         self.bp_decoder
             .build_result(success, decoded_detectors, max_iter)
-    }
-
-    /// Apply normal gammas sampled from gamma_dist_interval to all variables
-    fn apply_normal_gammas(&mut self) {
-        let mut gammas = Array1::zeros(self.check_matrix().cols());
-        
-        // Check if gamma_dist_interval is a fixed value (low == high)
-        let (low, high) = self.relay_config.gamma_dist_interval;
-        let is_fixed = (low - high).abs() < 1e-12;
-        
-        for i in 0..gammas.len() {
-            gammas[i] = if is_fixed {
-                low  // Use fixed value
-            } else {
-                self.posterior_update_state
-                    .uniform
-                    .sample(&mut self.posterior_update_state.rng_std)
-            };
-        }
-        self.bp_decoder.set_memory_strengths_f64(gammas);
     }
 
     fn write_log(&mut self, file: File) {
