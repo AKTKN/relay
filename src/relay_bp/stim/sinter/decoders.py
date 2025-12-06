@@ -29,7 +29,8 @@ from typing import TYPE_CHECKING, Optional
 
 from ldpc.sinter_decoders import SinterBpOsdDecoder
 from ldpc.sinter_decoders.sinter_lsd_decoder import SinterLsdDecoder
-
+from tesseract_decoder import make_tesseract_sinter_decoders_dict, TesseractSinterDecoder
+import tesseract_decoder
 
 class SinterCompiledDecoder_BP(CompiledDecoder):
     def __init__(
@@ -654,6 +655,10 @@ def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
             if SinterLsdDecoder is None:
                 raise ImportError("SinterLsdDecoder unavailable.")
             built[name] = SinterLsdDecoder(**params)
+        elif name in ['tesseract', 'tesseract-long-beam', 'tesseract-short-beam']:
+            tesseract_decoders_dict = make_tesseract_sinter_decoders_dict() # ccurrently, custom parameters for terrerasct are not supported.
+            built[name] = tesseract_decoders_dict[name]
+            
         else:
             raise ValueError(f"Unknown decoder name: {name}")
     return built
