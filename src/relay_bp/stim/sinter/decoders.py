@@ -329,7 +329,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         # --- For repulsive mode ---
         ensemble_mode = "normal",
         repulsive_size: int = 0,
-        repulsive_gamma_dist: tuple[float, float] = None,
+        repulsive_gamma_dist: tuple[float, float] = (0.0, 0.0),
         abs_llr_threshold: float = None,
         pulse_per_leg: int = None,
         start_leg: int = None,
