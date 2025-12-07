@@ -142,7 +142,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     iter_deltas_list.append(iter_delta)
                     vote_deltas_list.append(vote_delta)
                 else:
-                    print("Warning: Extra result is None, cannot compute deltas.")
+                    # print("Warning: Extra result is None, cannot compute deltas.")
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
 
