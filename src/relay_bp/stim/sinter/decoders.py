@@ -358,6 +358,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.use_automorphism = use_automorphism
         self.ensemble_mode = ensemble_mode
         self.repulsive_size = repulsive_size
+        if repulsive_gamma_dist is None:          # <- add guard
+            repulsive_gamma_dist = (0.0, 0.0)
         self.repulsive_gamma_dist = tuple(repulsive_gamma_dist) 
         self.abs_llr_threshold = abs_llr_threshold
         self.pulse_per_leg = pulse_per_leg
@@ -622,7 +624,7 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("use_automorphism", None)
     relay_config.pop("ensemble_mode", None)
     relay_config.pop("repulsive_size", None)
-    relay_config.pop("repulsive_gamma_dist", None)
+    relay_config.pop("repulsive_gamma_dist", (0.0, 0.0))
     relay_config.pop("abs_llr_threshold", None)
     relay_config.pop("pulse_per_leg", None)
     relay_config.pop("start_leg", None)
