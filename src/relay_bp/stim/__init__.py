@@ -14,6 +14,7 @@ except ImportError:
     raise
 
 from .sinter import (
+    DecodeResult,
     CheckMatrices,
     SinterDecoder_MemBP,
     SinterDecoder_MSLBP,

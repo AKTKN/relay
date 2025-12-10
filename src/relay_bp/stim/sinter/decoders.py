@@ -15,7 +15,7 @@ import pathlib
 from sinter import Decoder, CompiledDecoder
 import numpy as np
 import numpy.typing as npt
-
+from dataclasses import dataclass, asdict, field
 import scipy.sparse as sparse
 from autdec.igraph_auts import random_vertex_graph_auts_from_bliss
 
@@ -24,13 +24,16 @@ import stim
 import relay_bp
 
 from .check_matrices import CheckMatrices
+from .decode_result import DecodeResult
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Tuple, List
 
 from ldpc.sinter_decoders import SinterBpOsdDecoder
 from ldpc.sinter_decoders.sinter_lsd_decoder import SinterLsdDecoder
 from tesseract_decoder import make_tesseract_sinter_decoders_dict, TesseractSinterDecoder
+# Note: retesseract imports are done inside build_decoders() to avoid circular import
 import tesseract_decoder
+
 
 class SinterCompiledDecoder_BP(CompiledDecoder):
     def __init__(
@@ -96,12 +99,13 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         num_checks = self.check_matrices.check_matrix.shape[0]
         if syndromes.shape[1] > num_checks:
             syndromes = syndromes[:, :num_checks]
-
         iterations = None
         converged = None
         logical_gaps = None
         iter_deltas = None  
         vote_deltas = None
+        mean_iterations = None
+        std_iterations = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -117,6 +121,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             # 差分メトリックの計算
             iter_deltas_list = []
             vote_deltas_list = []
+            mean_iter_list = []
+            std_iter_list = []
 
             for res in results:
                 extra = res.extra
@@ -125,8 +131,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     runner_up_iter = extra.get('runner_up_coset_avg_iter')
                     selected_votes = extra.get('selected_coset_votes')
                     runner_up_votes = extra.get('runner_up_coset_votes')
-
-                    # print(f"Debug: selected_iter={selected_iter}, runner_up_iter={runner_up_iter}, selected_votes={selected_votes}, runner_up_votes={runner_up_votes}")
+                    
+                    # Collect mean/std iterations if available
+                    mean_iter_list.append(extra.get('ensemble_mean_iteration'))
+                    std_iter_list.append(extra.get('ensemble_std_iteration'))
                     
                     # 差分を計算 (runner_up - selected)
                     if runner_up_iter is not None and selected_iter is not None:
@@ -142,27 +150,33 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     iter_deltas_list.append(iter_delta)
                     vote_deltas_list.append(vote_delta)
                 else:
-                    # print("Warning: Extra result is None, cannot compute deltas.")
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
+                    mean_iter_list.append(None)
+                    std_iter_list.append(None)
 
             # NumPy配列に変換（Noneを含むためobject型）
             iter_deltas = np.array(iter_deltas_list, dtype=object)
             vote_deltas = np.array(vote_deltas_list, dtype=object)
+            mean_iterations = np.array(mean_iter_list, dtype=object)
+            std_iterations = np.array(std_iter_list, dtype=object)
+            
+            # Mean/std iterations (convert to float array if all values are present)
+            if all(v is not None for v in mean_iter_list):
+                mean_iterations = np.array(mean_iter_list, dtype=float)
+            if all(v is not None for v in std_iter_list):
+                std_iterations = np.array(std_iter_list, dtype=float)
 
             # Try to use effective_iterations from ensemble extra if available
             extra = results[0].extra
             if extra is not None and extra.get("effective_iterations") is not None:
-                # print(f"Debug: Using effective_iterations from ensemble extra")
-                # print(f"Debug: Sample effective_iterations values (first 5): {[res.extra.get('effective_iterations') if res.extra is not None else None for res in results[:5]]}")
-                # Use effective_iterations from all results
                 iterations = np.array([
                     res.extra["effective_iterations"] if res.extra is not None else float(res.iterations)
                     for res in results
                 ], dtype=float)
             else:
                 # Fallback to regular iterations with inf for non-converged
-                iterations = np.array([res.iterations for res in results], dtype=float) # return type from rust is int, so we need to convert to float.
+                iterations = np.array([res.iterations for res in results], dtype=float)
                 iterations[~converged] = np.inf
                 
         else:
@@ -177,15 +191,23 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             predictions = (predictions + self.check_matrices.observables_bias) % 2
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
-        if self.get_detail:
-            return outputs, iterations, converged, logical_gaps, iter_deltas, vote_deltas
-        else:
-            return outputs
+        
+        return DecodeResult(
+            predictions=outputs,
+            iterations=iterations,
+            converged=converged,
+            mean_iterations=mean_iterations,
+            std_iterations=std_iterations,
+            logical_gaps=logical_gaps,
+            iter_deltas=iter_deltas,
+            vote_deltas=vote_deltas,
+        )
 
     def __del__(self):
         """デストラクタで蓄積したデータを保存"""
         if hasattr(self, 'save_detail_path') and self.save_detail_path is not None:
             self._save_accumulated_details()
+
 
 
 class SinterDecoder_BaseBP(Decoder):
@@ -267,8 +289,6 @@ class SinterDecoder_BaseBP(Decoder):
         if check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + check_matrices.syndrome_bias) % 2
 
-
-
         if self.get_detail_result:
             results = observable_decoder.decode_observables_detailed_batch(
                 syndromes,
@@ -303,6 +323,7 @@ class SinterDecoder_BaseBP(Decoder):
             format="b8",
             num_observables=dem.num_observables,
         )
+
 
 class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
     def __init__(
@@ -440,8 +461,6 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             pulse_per_leg=self.pulse_per_leg,
             start_leg=self.start_leg,
         )
-
-
         return observable_decoder
     
     
@@ -660,8 +679,94 @@ def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
         elif name in ['tesseract', 'tesseract-long-beam', 'tesseract-short-beam']:
             tesseract_decoders_dict = make_tesseract_sinter_decoders_dict() # ccurrently, custom parameters for terrerasct are not supported.
             built[name] = tesseract_decoders_dict[name]
-            
+        elif name == "retesseract":
+            # ReTesseract uses dataclass-based configuration (import here to avoid circular import)
+            from .retesseract import SinterDecoderReTesseract
+            config = build_retesseract_config(params)
+            built[name] = SinterDecoderReTesseract(config=config, seed=params.get("seed"))
         else:
             raise ValueError(f"Unknown decoder name: {name}")
     return built
+
+
+def build_retesseract_config(params: dict):
+    """
+    Build ReTesseractConfig from a flat dictionary of parameters.
+    
+    The params dict can contain keys like:
+    - relay_bp.alpha, relay_bp.gamma0, relay_bp.pre_iter, ...
+    - harmonized.ensemble_size, harmonized.selection_strategy, ...
+    - tesseract.det_beam, tesseract.pqlimit, ...
+    - integration.independent_mode, integration.use_llr_based_det_order, ...
+    - confidence_threshold (top-level ReTesseract param)
+    
+    Or use nested dicts:
+    - relay_bp_config: {alpha: ..., gamma0: ...}
+    - harmonized_config: {ensemble_size: ..., ...}
+    - tesseract_config: {det_beam: ..., ...}
+    - tesseract_integration_config: {independent_mode: ..., ...}
+    """
+    # Import here to avoid circular import
+    from .retesseract import (
+        ReTesseractConfig,
+        RelayBPConfig,
+        HarmonizedConfig,
+        TesseractConfig,
+        TesseractIntegrationConfig,
+    )
+    
+    # Extract nested configs if provided directly
+    relay_bp_dict = params.get("relay_bp_config", {})
+    harmonized_dict = params.get("harmonized_config", {})
+    tesseract_dict = params.get("tesseract_config", {})
+    integration_dict = params.get("tesseract_integration_config", {})
+    
+    # Also support flat dot-notation keys (relay_bp.alpha -> relay_bp_config.alpha)
+    for key, value in params.items():
+        if key.startswith("relay_bp."):
+            field_name = key[len("relay_bp."):]
+            relay_bp_dict[field_name] = value
+        elif key.startswith("harmonized."):
+            field_name = key[len("harmonized."):]
+            harmonized_dict[field_name] = value
+        elif key.startswith("tesseract."):
+            field_name = key[len("tesseract."):]
+            tesseract_dict[field_name] = value
+        elif key.startswith("integration."):
+            field_name = key[len("integration."):]
+            integration_dict[field_name] = value
+    
+    # Handle tuple conversion for gamma_dist_interval and perturbation_range
+    if "gamma_dist_interval" in relay_bp_dict and isinstance(relay_bp_dict["gamma_dist_interval"], list):
+        relay_bp_dict["gamma_dist_interval"] = tuple(relay_bp_dict["gamma_dist_interval"])
+    if "perturbation_range" in harmonized_dict and isinstance(harmonized_dict["perturbation_range"], list):
+        harmonized_dict["perturbation_range"] = tuple(harmonized_dict["perturbation_range"])
+    if "repulsive_gamma_dist" in harmonized_dict and isinstance(harmonized_dict["repulsive_gamma_dist"], list):
+        harmonized_dict["repulsive_gamma_dist"] = tuple(harmonized_dict["repulsive_gamma_dist"])
+    
+    # Handle beam_width_schedule conversion: list of [threshold, beam] -> list of tuples
+    if "beam_width_schedule" in integration_dict and isinstance(integration_dict["beam_width_schedule"], list):
+        schedule = integration_dict["beam_width_schedule"]
+        integration_dict["beam_width_schedule"] = [tuple(item) for item in schedule]
+    
+    # Build config objects
+    relay_bp_config = RelayBPConfig(**relay_bp_dict) if relay_bp_dict else RelayBPConfig()
+    harmonized_config = HarmonizedConfig(**harmonized_dict) if harmonized_dict else HarmonizedConfig()
+    tesseract_config = TesseractConfig(**tesseract_dict) if tesseract_dict else TesseractConfig()
+    integration_config = TesseractIntegrationConfig(**integration_dict) if integration_dict else TesseractIntegrationConfig()
+    
+    # Top-level ReTesseract switching parameters
+    confidence_threshold = params.get("confidence_threshold", 20.0)
+    mean_iteration_threshold = params.get("mean_iteration_threshold", None)
+    std_iteration_threshold = params.get("std_iteration_threshold", None)
+    
+    return ReTesseractConfig(
+        relay_bp_config=relay_bp_config,
+        harmonized_config=harmonized_config,
+        tesseract_config=tesseract_config,
+        tesseract_integration_config=integration_config,
+        confidence_threshold=confidence_threshold,
+        mean_iteration_threshold=mean_iteration_threshold,
+        std_iteration_threshold=std_iteration_threshold,
+    )
 

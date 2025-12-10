@@ -142,6 +142,48 @@ impl ObservableDecodeResult {
                     dict.set_item("selected_coset_votes", ensemble_extra.selected_coset_votes)?;
                     dict.set_item("runner_up_coset_votes", ensemble_extra.runner_up_coset_votes)?;
                     
+                    // New fields
+                    dict.set_item("converged_count", ensemble_extra.converged_count)?;
+                    
+                    // ensemble_posterior_ratios as list of numpy arrays
+                    let ensemble_posterior_list: Vec<_> = ensemble_extra
+                        .ensemble_posterior_ratios
+                        .iter()
+                        .map(|arr| PyArray1::from_array(py, arr).into_py(py))
+                        .collect();
+                    dict.set_item("ensemble_posterior_ratios", ensemble_posterior_list)?;
+                    
+                    // ensemble_mean_posterior_ratios as numpy array or None
+                    if let Some(ref mean_arr) = ensemble_extra.ensemble_mean_posterior_ratios {
+                        dict.set_item("ensemble_mean_posterior_ratios", 
+                            PyArray1::from_array(py, mean_arr).into_py(py))?;
+                    } else {
+                        dict.set_item("ensemble_mean_posterior_ratios", py.None())?;
+                    }
+                    
+                    // ensemble_std_posterior_ratios as numpy array or None
+                    if let Some(ref std_arr) = ensemble_extra.ensemble_std_posterior_ratios {
+                        dict.set_item("ensemble_std_posterior_ratios", 
+                            PyArray1::from_array(py, std_arr).into_py(py))?;
+                    } else {
+                        dict.set_item("ensemble_std_posterior_ratios", py.None())?;
+                    }
+                    
+                    dict.set_item("ensemble_iteration_dist", ensemble_extra.ensemble_iteration_dist.clone())?;
+                    dict.set_item("ensemble_mean_iteration", ensemble_extra.ensemble_mean_iteration)?;
+                    dict.set_item("ensemble_std_iteration", ensemble_extra.ensemble_std_iteration)?;
+                    
+                    // residual_result as list of numpy arrays or None
+                    if let Some(ref residual) = ensemble_extra.residual_result {
+                        let residual_list: Vec<_> = residual
+                            .iter()
+                            .map(|arr| PyArray1::from_array(py, arr).into_py(py))
+                            .collect();
+                        dict.set_item("residual_result", residual_list)?;
+                    } else {
+                        dict.set_item("residual_result", py.None())?;
+                    }
+                    
                     Ok(dict.into())
                 }
             }

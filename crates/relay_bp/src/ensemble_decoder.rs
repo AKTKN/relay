@@ -174,6 +174,71 @@ impl Decoder for EnsembleDecoder{
         let max_child_iters = child_iterations.iter().copied().max().unwrap_or(0);
         let effective_iterations = if any_non_converged { f64::INFINITY } else { max_child_iters as f64 };
 
+        // Calculate ensemble-wide statistics
+        let converged_count = child_success.iter().filter(|&&s| s).count();
+        
+        // Collect posterior ratios from all child decoders
+        let ensemble_posterior_ratios: Vec<Array1<f64>> = results.iter()
+            .map(|r| r.posterior_ratios.clone())
+            .collect();
+        
+        // Calculate mean and std of posterior ratios across all children
+        let num_variables = ensemble_posterior_ratios.first()
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+        
+        let ensemble_mean_posterior_ratios = if !ensemble_posterior_ratios.is_empty() && num_variables > 0 {
+            let mut means = Array1::<f64>::zeros(num_variables);
+            for i in 0..num_variables {
+                let sum: f64 = ensemble_posterior_ratios.iter()
+                    .map(|arr| arr[i])
+                    .sum();
+                means[i] = sum / ensemble_posterior_ratios.len() as f64;
+            }
+            Some(means)
+        } else {
+            None
+        };
+        
+        let ensemble_std_posterior_ratios = if let Some(ref means) = ensemble_mean_posterior_ratios {
+            let mut stds = Array1::<f64>::zeros(num_variables);
+            for i in 0..num_variables {
+                let variance: f64 = ensemble_posterior_ratios.iter()
+                    .map(|arr| {
+                        let diff = arr[i] - means[i];
+                        diff * diff
+                    })
+                    .sum::<f64>() / ensemble_posterior_ratios.len() as f64;
+                stds[i] = variance.sqrt();
+            }
+            Some(stds)
+        } else {
+            None
+        };
+        
+        // Calculate iteration statistics (using max_iter for non-converged decoders)
+        let ensemble_iteration_dist = child_iterations.clone();
+        let ensemble_mean_iteration = if !child_iterations.is_empty() {
+            let sum: f64 = child_iterations.iter()
+                .map(|&iter| iter as f64)
+                .sum();
+            Some(sum / child_iterations.len() as f64)
+        } else {
+            None
+        };
+        
+        let ensemble_std_iteration = if let Some(mean_iter) = ensemble_mean_iteration {
+            let variance: f64 = child_iterations.iter()
+                .map(|&iter| {
+                    let diff = iter as f64 - mean_iter;
+                    diff * diff
+                })
+                .sum::<f64>() / child_iterations.len() as f64;
+            Some(variance.sqrt())
+        } else {
+            None
+        };
+
         let converged_results: Vec<DecodeResult> = results.into_iter().filter(|r| r.success).collect();
         if converged_results.is_empty()  {
             let mut res = first_result;
@@ -182,19 +247,34 @@ impl Decoder for EnsembleDecoder{
             // Overwrite final iterations to the max of children; effective as +inf if any failed.
             res.iterations = max_child_iters;
 
-            // Populate minimal ensemble extra (no cosets/llr if unavailable)
+            // Collect residual results (provisional corrections based on final marginals)
+            let residual_result: Vec<Array1<Bit>> = ensemble_posterior_ratios.iter()
+                .map(|posterior| {
+                    posterior.mapv(|llr| if llr < 0.0 { 1 } else { 0 })
+                })
+                .collect();
+
+            // Populate ensemble extra with statistics
             res.extra = BPExtraResult::Ensemble(EnsembleExtraResult{
                 all_corrections: vec![],
                 llr_sums: vec![],
                 cosets: vec![],
                 selected_index: 0,
-                child_iterations,
-                child_success,
+                child_iterations: child_iterations.clone(),
+                child_success: child_success.clone(),
                 effective_iterations: Some(effective_iterations),
                 selected_coset_avg_iter: None,
                 runner_up_coset_avg_iter: None,
                 selected_coset_votes: None,
                 runner_up_coset_votes: None,
+                converged_count,
+                ensemble_posterior_ratios,
+                ensemble_mean_posterior_ratios,
+                ensemble_std_posterior_ratios,
+                ensemble_iteration_dist,
+                ensemble_mean_iteration,
+                ensemble_std_iteration,
+                residual_result: Some(residual_result),
             });
             return res;
         }
@@ -272,13 +352,21 @@ impl Decoder for EnsembleDecoder{
                     llr_sums: Vec::new(),
                     cosets: Vec::new(),
                     selected_index: 0,
-                    child_iterations,
-                    child_success,
+                    child_iterations: child_iterations.clone(),
+                    child_success: child_success.clone(),
                     effective_iterations: Some(effective_iterations),
                     selected_coset_avg_iter: Some(selected_avg_iter),
                     runner_up_coset_avg_iter: runner_up_avg_iter,
                     selected_coset_votes: Some(selected_votes),
                     runner_up_coset_votes: runner_up_votes,
+                    converged_count,
+                    ensemble_posterior_ratios,
+                    ensemble_mean_posterior_ratios,
+                    ensemble_std_posterior_ratios,
+                    ensemble_iteration_dist,
+                    ensemble_mean_iteration,
+                    ensemble_std_iteration,
+                    residual_result: None,  // At least one decoder converged
                 });
 
                 final_result
@@ -311,13 +399,21 @@ impl Decoder for EnsembleDecoder{
                     llr_sums: Vec::new(),
                     cosets: Vec::new(),
                     selected_index: 0,
-                    child_iterations,
-                    child_success,
+                    child_iterations: child_iterations.clone(),
+                    child_success: child_success.clone(),
                     effective_iterations: Some(effective_iterations),
                     selected_coset_avg_iter: Some(selected_avg_iter),
                     runner_up_coset_avg_iter: runner_up_avg_iter,
                     selected_coset_votes: Some(selected_votes),
                     runner_up_coset_votes: runner_up_votes,
+                    converged_count,
+                    ensemble_posterior_ratios,
+                    ensemble_mean_posterior_ratios,
+                    ensemble_std_posterior_ratios,
+                    ensemble_iteration_dist,
+                    ensemble_mean_iteration,
+                    ensemble_std_iteration,
+                    residual_result: None,  // At least one decoder converged
                 });
 
                 final_result

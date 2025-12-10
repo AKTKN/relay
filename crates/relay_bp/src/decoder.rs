@@ -284,5 +284,44 @@ pub struct EnsembleExtraResult {
     pub selected_coset_avg_iter: Option<f64>,
     pub runner_up_coset_avg_iter: Option<f64>,
     pub selected_coset_votes: Option<usize>,     
-    pub runner_up_coset_votes: Option<usize>, 
+    pub runner_up_coset_votes: Option<usize>,
+
+    /// Number of converged decoders in the ensemble
+    #[serde(default)]
+    pub converged_count: usize,
+    
+    /// Posterior ratios (marginal LLRs) for each child decoder
+    /// Vec of length ensemble_size, each element is Array1<f64> of variable node LLRs
+    #[serde(default)]
+    pub ensemble_posterior_ratios: Vec<Array1<f64>>,
+    
+    /// Mean of posterior ratios across all child decoders for each variable node
+    /// Array1<f64> of length num_variables
+    #[serde(default)]
+    pub ensemble_mean_posterior_ratios: Option<Array1<f64>>,
+    
+    /// Standard deviation of posterior ratios across all child decoders for each variable node
+    /// Array1<f64> of length num_variables
+    #[serde(default)]
+    pub ensemble_std_posterior_ratios: Option<Array1<f64>>,
+    
+    /// Iteration count for each child decoder (same as child_iterations for consistency)
+    #[serde(default)]
+    pub ensemble_iteration_dist: Vec<usize>,
+    
+    /// Mean iteration count across all child decoders
+    /// Non-converged decoders use max_iter in the calculation
+    #[serde(default)]
+    pub ensemble_mean_iteration: Option<f64>,
+    
+    /// Standard deviation of iteration counts across all child decoders
+    /// Non-converged decoders use max_iter in the calculation
+    #[serde(default)]
+    pub ensemble_std_iteration: Option<f64>,
+    
+    /// Residual results when all decoders failed to converge
+    /// Contains the provisional corrections based on final marginals from each child decoder
+    /// None if at least one decoder converged
+    #[serde(default)]
+    pub residual_result: Option<Vec<Array1<Bit>>>,
 }

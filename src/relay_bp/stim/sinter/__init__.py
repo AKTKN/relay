@@ -7,7 +7,9 @@
 # Any modifications or derivative works of this code must retain this
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
-
+from .decode_result import (
+    DecodeResult,
+)
 
 from .check_matrices import (
     CheckMatrices,
@@ -18,4 +20,15 @@ from .decoders import (
     SinterDecoder_RelayBP,
     sinter_decoders,
     build_decoders,
+    build_retesseract_config,
+)
+from .retesseract import (
+    SinterDecoderReTesseract,
+    SinterReTesseractCompiledDecoder,
+    ReTesseractConfig,
+    RelayBPConfig,
+    HarmonizedConfig,
+    TesseractConfig,
+    TesseractIntegrationConfig,
+    modify_dem_priors_from_posteriors,
 )
