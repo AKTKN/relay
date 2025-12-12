@@ -261,6 +261,13 @@ class TesseractConfig:
     # --- Processing Options ---
     merge_errors: bool = True
     det_orders: Optional[List[List[int]]] = None
+    
+    # --- Detector Ordering Generation ---
+    # Number of detector orderings to generate (used with build_det_orders)
+    num_det_orders: Optional[int] = None
+    # Method for generating detector orderings (e.g., 'DetIndex', 'Random', 'Greedy')
+    # This will be passed to tesseract_decoder.utils.DetOrder enum
+    det_order_method: str = "DetIndex"
 
     # --- Debug / Visualization ---
     verbose: bool = False
@@ -540,14 +547,23 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         else:
             config_dict['det_beam'] = tess_cfg.det_beam
         
-        # --- LLR-based detector ordering ---
+        # --- Detector ordering ---
+        # Priority: 1) LLR-based (non-independent mode), 2) build_det_orders (independent mode with num_det_orders), 3) manual det_orders
         if not integration_cfg.independent_mode and integration_cfg.use_llr_based_det_order:
+            # LLR-based detector ordering for non-independent mode
             llr_det_order = self._compute_llr_based_det_order(mean_posterior_ratios)
             if llr_det_order is not None:
                 config_dict['det_orders'] = llr_det_order
             elif tess_cfg.det_orders is not None:
                 config_dict['det_orders'] = tess_cfg.det_orders
+            elif tess_cfg.num_det_orders is not None:
+                # Fallback to build_det_orders if LLR fails
+                config_dict['det_orders'] = self._build_detector_orderings(modified_dem, tess_cfg)
+        elif tess_cfg.num_det_orders is not None:
+            # Independent mode: use build_det_orders if num_det_orders is specified
+            config_dict['det_orders'] = self._build_detector_orderings(modified_dem, tess_cfg)
         elif tess_cfg.det_orders is not None:
+            # Manual det_orders provided
             config_dict['det_orders'] = tess_cfg.det_orders
         
         # Create tesseract config and decoder
@@ -557,6 +573,31 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         # Run decode
         prediction = decoder.decode(syndrome.astype(bool))
         return np.array(prediction, dtype=np.uint8)
+    
+    def _build_detector_orderings(
+        self,
+        dem: stim.DetectorErrorModel,
+        tess_cfg: TesseractConfig,
+    ) -> List[List[int]]:
+        """Build detector orderings using tesseract_decoder.utils.build_det_orders.
+        
+        Args:
+            dem: The detector error model
+            tess_cfg: Tesseract configuration containing num_det_orders and det_order_method
+            
+        Returns:
+            List of detector orderings
+        """
+        # Get the DetOrder enum value from the method string
+        det_order_enum = getattr(tesseract_decoder.utils.DetOrder, tess_cfg.det_order_method)
+        
+        det_orders = tesseract_decoder.utils.build_det_orders(
+            dem=dem,
+            num_det_orders=tess_cfg.num_det_orders,
+            method=det_order_enum,
+        )
+        
+        return det_orders
 
 
     def decode_shots_bit_packed(
