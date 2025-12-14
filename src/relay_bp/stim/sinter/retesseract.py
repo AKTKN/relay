@@ -605,12 +605,20 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         *,
         bit_packed_detection_event_data: "np.ndarray",
     ) -> "np.ndarray":
-        syndromes = np.unpackbits(
+        syndromes_raw = np.unpackbits(
             bit_packed_detection_event_data, bitorder="little", axis=1
         ).astype(np.uint8)
 
+        # Tesseract expects the original DEM-sized syndrome; keep a raw copy for it.
+        num_detectors = self.dem.num_detectors
+        if syndromes_raw.shape[1] > num_detectors:
+            syndromes_raw = syndromes_raw[:, :num_detectors]
+
+        # Relay-BP operates on a pruned check matrix, so apply biasing/slicing only
+        # to the BP view of the syndrome.
+        syndromes_bp = syndromes_raw
         if self.check_matrices.syndrome_bias is not None:
-            syndromes = (syndromes + self.check_matrices.syndrome_bias) % 2
+            syndromes_bp = (syndromes_bp + self.check_matrices.syndrome_bias) % 2
 
         # In harmonized decoder, it calculates permutation of syndromes. 
         # At that time, the dimension of checks and syndromes must be the same. 
@@ -618,11 +626,11 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         # Therefore, when the dimension of check matrix (row) is not a multiple of 8, 
         # we need to slice the syndrome data to match the dimension.
         num_checks = self.check_matrices.check_matrix.shape[0]
-        if syndromes.shape[1] > num_checks:
-            syndromes = syndromes[:, :num_checks]
+        if syndromes_bp.shape[1] > num_checks:
+            syndromes_bp = syndromes_bp[:, :num_checks]
 
         results = self.observable_decoder.decode_observables_detailed_batch(
-            syndromes,
+            syndromes_bp,
             parallel=self.parallel,
             progress_bar=self.show_progress,
             leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
@@ -653,6 +661,9 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         switch_reason = ''
         correction_change = 0
 
+        # Track rows where Tesseract overrides BP so we can handle biases correctly later.
+        used_tesseract = np.zeros(len(results), dtype=bool)
+
         # --- Switching logic ---
         for i, res in enumerate(results):
             # Extract mean_iteration and std_iteration from extra if available
@@ -674,10 +685,11 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
             if do_switch:
                 switch_count += 1
                 switch_reason += reason
+                used_tesseract[i] = True
                 
                 # Run Tesseract with BP-guided configuration if available
                 pred_tesseract = self._run_tesseract(
-                    syndromes[i,:],
+                    syndromes_raw[i, :],
                     logical_gap=logical_gaps[i],
                     mean_posterior_ratios=mean_posterior_ratios,
                 )
@@ -687,10 +699,11 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
 
                 # To indicate that Tesseract was used, we can set converged to True
                 converged[i] = True
-
-
+        # Apply observable bias only to the Relay-BP predictions. Tesseract already
+        # works with the original DEM, so adding the bias again would be incorrect.
         if self.check_matrices.observables_bias is not None:
-            predictions = (predictions + self.check_matrices.observables_bias) % 2
+            bias = self.check_matrices.observables_bias
+            predictions[~used_tesseract] = (predictions[~used_tesseract] + bias) % 2
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
 
