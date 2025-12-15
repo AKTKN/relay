@@ -677,7 +677,7 @@ def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
                 raise ImportError("SinterLsdDecoder unavailable.")
             built[name] = SinterLsdDecoder(**params)
         elif name in ['tesseract', 'tesseract-long-beam', 'tesseract-short-beam']:
-            tesseract_decoders_dict = make_tesseract_sinter_decoders_dict() # ccurrently, custom parameters for terrerasct are not supported.
+            tesseract_decoders_dict = make_tesseract_sinter_decoders_dict() # currently, custom parameters for terrerasct are not supported.
             built[name] = tesseract_decoders_dict[name]
         elif name == "retesseract":
             # ReTesseract uses dataclass-based configuration (import here to avoid circular import)

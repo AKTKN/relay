@@ -250,8 +250,8 @@ class HarmonizedConfig:
 @dataclass
 class TesseractConfig:
     # --- Search parameters ---
-    det_beam: int = 5
-    pqlimit: int = 200000
+    det_beam: int = 20
+    pqlimit: int = 1000000
     beam_climbing: bool = True
     no_revisit_dets: bool = True
 
@@ -306,7 +306,7 @@ class TesseractIntegrationConfig:
     # How much to trust the BP posterior when modifying priors (0.0 - 1.0)
     # 0.0 = use original DEM priors, 1.0 = fully replace with BP posteriors
     # Intermediate values blend original and posterior probabilities
-    prior_modification_strength: float = 1.0
+    prior_modification_strength: float = 0.0
 
 
 @dataclass
@@ -568,9 +568,7 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         
         # Create tesseract config and decoder
         tesseract_config = tesseract.TesseractConfig(**config_dict)
-
-        print(f"Custom configuration detection beam: {tesseract_config.det_beam}")
-        decoder = tesseract.TesseractDecoder(tesseract_config)
+        tesseract_decoder = tesseract.TesseractDecoder(tesseract_config)
         
         # --- Decode with Tesseract ---
         # The syndrome array is unpacked (0s and 1s), so convert to bool for decode()
@@ -582,7 +580,7 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         
         # Run decode with syndrome bool array (official API)
         # This internally extracts fired detector indices and returns observable predictions
-        predictions_bool = decoder.decode(syndrome_bool)
+        predictions_bool = tesseract_decoder.decode(syndrome_bool)
         
         # Convert predictions to unpacked uint8 format (matching res.observables format)
         output = np.array(predictions_bool, dtype=np.uint8)
@@ -595,7 +593,7 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
               f"output_pattern={output[:min(12, len(output))]}", file=sys.stderr, flush=True)
         
         return output
-    
+
     def _build_detector_orderings(
         self,
         dem: stim.DetectorErrorModel,
