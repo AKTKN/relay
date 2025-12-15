@@ -568,6 +568,8 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         
         # Create tesseract config and decoder
         tesseract_config = tesseract.TesseractConfig(**config_dict)
+
+        print(f"Custom configuration detection beam: {tesseract_config.det_beam}")
         decoder = tesseract.TesseractDecoder(tesseract_config)
         
         # Run decode
@@ -599,7 +601,6 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         
         return det_orders
 
-
     def decode_shots_bit_packed(
         self,
         *,
@@ -629,6 +630,41 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         if syndromes_bp.shape[1] > num_checks:
             syndromes_bp = syndromes_bp[:, :num_checks]
 
+        # === DEBUG: DEM and Syndrome Consistency Check ===
+        import sys
+        print(f"[DEBUG] DEM/Syndrome Check:", file=sys.stderr, flush=True)
+        print(f"  Relay-BP DEM: num_detectors={self.check_matrices.check_matrix.shape[0]}, num_observables={self.check_matrices.observables_matrix.shape[0]}", file=sys.stderr, flush=True)
+        print(f"  Tesseract DEM: num_detectors={self.dem.num_detectors}, num_observables={self.dem.num_observables}", file=sys.stderr, flush=True)
+        
+        print(f"[DEBUG] Syndrome dimensions:", file=sys.stderr, flush=True)
+        print(f"  syndromes_raw shape: {syndromes_raw.shape} (num_detectors={num_detectors})", file=sys.stderr, flush=True)
+        print(f"  syndromes_bp shape: {syndromes_bp.shape} (num_checks={num_checks})", file=sys.stderr, flush=True)
+        
+        # === DEBUG: Bias Information ===
+        print(f"[DEBUG] Bias Information:", file=sys.stderr, flush=True)
+        if self.check_matrices.syndrome_bias is not None:
+            syndrome_bias_nonzero = np.count_nonzero(self.check_matrices.syndrome_bias)
+            print(f"  syndrome_bias: shape={self.check_matrices.syndrome_bias.shape}, nonzero={syndrome_bias_nonzero}, "
+                  f"values={self.check_matrices.syndrome_bias}", file=sys.stderr, flush=True)
+        else:
+            print(f"  syndrome_bias: None", file=sys.stderr, flush=True)
+        
+        if self.check_matrices.observables_bias is not None:
+            observables_bias_nonzero = np.count_nonzero(self.check_matrices.observables_bias)
+            print(f"  observables_bias: shape={self.check_matrices.observables_bias.shape}, nonzero={observables_bias_nonzero}, "
+                  f"values={self.check_matrices.observables_bias}", file=sys.stderr, flush=True)
+        else:
+            print(f"  observables_bias: None", file=sys.stderr, flush=True)
+        
+        # === DEBUG: First shot syndrome comparison (only for first few shots) ===
+        if syndromes_raw.shape[0] > 0:
+            print(f"[DEBUG] First shot syndrome comparison (shot 0):", file=sys.stderr, flush=True)
+            print(f"  syndromes_raw[0, :20]: {syndromes_raw[0, :20]}", file=sys.stderr, flush=True)
+            print(f"  syndromes_bp[0, :20]: {syndromes_bp[0, :20]}", file=sys.stderr, flush=True)
+            if self.check_matrices.syndrome_bias is not None:
+                bias_applied = (syndromes_raw[0, :num_checks] + self.check_matrices.syndrome_bias) % 2
+                print(f"  Expected bias-applied: {bias_applied[:20]}", file=sys.stderr, flush=True)
+
         results = self.observable_decoder.decode_observables_detailed_batch(
             syndromes_bp,
             parallel=self.parallel,
@@ -639,7 +675,7 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         converged = np.array([res.converged for res in results])
         logical_gaps = np.array([res.logical_gap for res in results])
 
-        # --- Iteration coun thandling ---
+        # --- Iteration count handling ---
         # Try to use effective_iterations from ensemble extra if available
         extra = results[0].extra
         if extra is not None and extra.get("effective_iterations") is not None:
@@ -663,6 +699,9 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
 
         # Track rows where Tesseract overrides BP so we can handle biases correctly later.
         used_tesseract = np.zeros(len(results), dtype=bool)
+
+        # === DEBUG: Prediction before and after observable bias ===
+        predictions_before_bias = predictions.copy()
 
         # --- Switching logic ---
         for i, res in enumerate(results):
@@ -693,17 +732,37 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
                     logical_gap=logical_gaps[i],
                     mean_posterior_ratios=mean_posterior_ratios,
                 )
+                print(f"Debug: relay pred: {predictions[i, :]}, tesseract pred: {pred_tesseract}, logical_gap: {logical_gaps[i]}", file=sys.stderr, flush=True)
                 if not np.array_equal(predictions[i,:], pred_tesseract):
+                    print(f"Debug: Correction changed by Tesseract for shot {i}.")
                     correction_change += 1
                     predictions[i,:] = pred_tesseract
-
                 # To indicate that Tesseract was used, we can set converged to True
                 converged[i] = True
+
         # Apply observable bias only to the Relay-BP predictions. Tesseract already
         # works with the original DEM, so adding the bias again would be incorrect.
         if self.check_matrices.observables_bias is not None:
             bias = self.check_matrices.observables_bias
             predictions[~used_tesseract] = (predictions[~used_tesseract] + bias) % 2
+
+        # === DEBUG: Observable Bias Application ===
+        print(f"[DEBUG] Observable Bias Application:", file=sys.stderr, flush=True)
+        print(f"  used_tesseract count: {np.count_nonzero(used_tesseract)}", file=sys.stderr, flush=True)
+        if self.check_matrices.observables_bias is not None:
+            bias_applied_count = np.count_nonzero(~used_tesseract)
+            print(f"  Bias applied to {bias_applied_count} shots (Relay-BP only)", file=sys.stderr, flush=True)
+            if bias_applied_count > 0:
+                # Show example of bias application for first Relay-BP shot
+                bp_indices = np.where(~used_tesseract)[0]
+                if len(bp_indices) > 0:
+                    example_idx = bp_indices[0]
+                    print(f"  Example shot {example_idx}:", file=sys.stderr, flush=True)
+                    print(f"    Before bias: {predictions_before_bias[example_idx, :]}", file=sys.stderr, flush=True)
+                    print(f"    After bias:  {predictions[example_idx, :]}", file=sys.stderr, flush=True)
+                    print(f"    Bias values: {self.check_matrices.observables_bias}", file=sys.stderr, flush=True)
+        else:
+            print(f"  No observables_bias applied", file=sys.stderr, flush=True)
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
 
@@ -718,6 +777,7 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
             switch_resason=switch_reason,
             correction_change_count=correction_change,
         )
+ 
 
 
 
