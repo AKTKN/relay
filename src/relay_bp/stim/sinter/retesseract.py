@@ -505,12 +505,12 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         """Run Tesseract decoder with optional BP-guided configuration.
         
         Args:
-            syndrome: The syndrome to decode
+            syndrome: The syndrome to decode (unpacked, shape: (num_detectors,))
             logical_gap: Logical gap from BP (used for dynamic beam width)
             mean_posterior_ratios: Mean LLR values from ensemble BP (used for det ordering and prior modification)
             
         Returns:
-            Predicted observables
+            Predicted observables (unpacked format, shape: (num_observables,) as uint8)
         """
         integration_cfg = self.config.tesseract_integration_config
         tess_cfg = self.config.tesseract_config
@@ -572,9 +572,29 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         print(f"Custom configuration detection beam: {tesseract_config.det_beam}")
         decoder = tesseract.TesseractDecoder(tesseract_config)
         
-        # Run decode
-        prediction = decoder.decode(syndrome.astype(bool))
-        return np.array(prediction, dtype=np.uint8)
+        # --- Decode with Tesseract ---
+        # The syndrome array is unpacked (0s and 1s), so convert to bool for decode()
+        # TesseractDecoder.decode() expects a bool array and internally extracts fired detector indices
+        num_detectors = self.dem.num_detectors
+        
+        # Ensure syndrome has correct length and type
+        syndrome_bool = syndrome[:num_detectors].astype(bool)
+        
+        # Run decode with syndrome bool array (official API)
+        # This internally extracts fired detector indices and returns observable predictions
+        predictions_bool = decoder.decode(syndrome_bool)
+        
+        # Convert predictions to unpacked uint8 format (matching res.observables format)
+        output = np.array(predictions_bool, dtype=np.uint8)
+        
+        # DEBUG: Verify output format
+        import sys
+        num_fired_dets = np.count_nonzero(syndrome_bool)
+        num_predicted_obs = np.count_nonzero(output)
+        print(f"[DEBUG] Tesseract decode: fired_detectors={num_fired_dets}, predicted_observables={num_predicted_obs}, "
+              f"output_pattern={output[:min(12, len(output))]}", file=sys.stderr, flush=True)
+        
+        return output
     
     def _build_detector_orderings(
         self,
