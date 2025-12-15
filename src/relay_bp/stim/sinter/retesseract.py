@@ -250,8 +250,8 @@ class HarmonizedConfig:
 @dataclass
 class TesseractConfig:
     # --- Search parameters ---
-    det_beam: int = 5
-    pqlimit: int = 200000
+    det_beam: int = 20
+    pqlimit: int = 1000000
     beam_climbing: bool = True
     no_revisit_dets: bool = True
 
@@ -306,7 +306,7 @@ class TesseractIntegrationConfig:
     # How much to trust the BP posterior when modifying priors (0.0 - 1.0)
     # 0.0 = use original DEM priors, 1.0 = fully replace with BP posteriors
     # Intermediate values blend original and posterior probabilities
-    prior_modification_strength: float = 1.0
+    prior_modification_strength: float = 0.0
 
 
 @dataclass
@@ -568,13 +568,11 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         
         # Create tesseract config and decoder
         tesseract_config = tesseract.TesseractConfig(**config_dict)
-
-        print(f"Custom configuration detection beam: {tesseract_config.det_beam}")
-        decoder = tesseract.TesseractDecoder(tesseract_config)
+        tesseract_decoder = tesseract.TesseractDecoder(tesseract_config)
         
         # Run decode
-        prediction = decoder.decode(syndrome.astype(bool))
-        return np.array(prediction, dtype=np.uint8)
+        tess_prediction = tesseract_decoder.decode(syndrome.astype(bool))
+        return np.array(tess_prediction, dtype=np.uint8)
     
     def _build_detector_orderings(
         self,
