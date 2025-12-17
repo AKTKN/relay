@@ -667,25 +667,36 @@ def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
     for spec in decoder_specs:
         name = spec.get("name")
         params = spec.get("params", {}) or {}
-        if name in {"relay-bp", "mem-bp", "msl-bp", "harmonized-bp"}:
+        
+        # Support 'type' field to allow multiple instances of the same decoder class
+        # e.g. name="relay-bp-1", params={"type": "relay-bp", ...}
+        decoder_type = params.get("type", name)
+        
+        # Create a copy of params to avoid modifying the original spec
+        # and remove 'type' so it doesn't get passed to constructors if they don't expect it
+        decoder_params = params.copy()
+        if "type" in decoder_params:
+            del decoder_params["type"]
+
+        if decoder_type in {"relay-bp", "mem-bp", "msl-bp", "harmonized-bp"}:
             # Reuse sinter_decoders factory (single extraction)
-            built[name] = sinter_decoders(**params)[name]
-        elif name == "bposd":
-            built[name] = SinterBpOsdDecoder(**params)
-        elif name == "bplsd":
+            built[name] = sinter_decoders(**decoder_params)[decoder_type]
+        elif decoder_type == "bposd":
+            built[name] = SinterBpOsdDecoder(**decoder_params)
+        elif decoder_type == "bplsd":
             if SinterLsdDecoder is None:
                 raise ImportError("SinterLsdDecoder unavailable.")
-            built[name] = SinterLsdDecoder(**params)
-        elif name in ['tesseract', 'tesseract-long-beam', 'tesseract-short-beam']:
+            built[name] = SinterLsdDecoder(**decoder_params)
+        elif decoder_type in ['tesseract', 'tesseract-long-beam', 'tesseract-short-beam']:
             tesseract_decoders_dict = make_tesseract_sinter_decoders_dict() # currently, custom parameters for terrerasct are not supported.
-            built[name] = tesseract_decoders_dict[name]
-        elif name == "retesseract":
+            built[name] = tesseract_decoders_dict[decoder_type]
+        elif decoder_type == "retesseract":
             # ReTesseract uses dataclass-based configuration (import here to avoid circular import)
             from .retesseract import SinterDecoderReTesseract
-            config = build_retesseract_config(params)
-            built[name] = SinterDecoderReTesseract(config=config, seed=params.get("seed"))
+            config = build_retesseract_config(decoder_params)
+            built[name] = SinterDecoderReTesseract(config=config, seed=decoder_params.get("seed"))
         else:
-            raise ValueError(f"Unknown decoder name: {name}")
+            raise ValueError(f"Unknown decoder type: {decoder_type} (for decoder '{name}')")
     return built
 
 
