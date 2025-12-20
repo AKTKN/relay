@@ -97,6 +97,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         # Therefore, when the dimension of check matrix (row) is not a multiple of 8, 
         # we need to slice the syndrome data to match the dimension.
         num_checks = self.check_matrices.check_matrix.shape[0]
+
+        # print("DEBUG: check matrix shape:", self.check_matrices.check_matrix.shape)
         if syndromes.shape[1] > num_checks:
             syndromes = syndromes[:, :num_checks]
         iterations = None
@@ -668,15 +670,18 @@ def build_decoders(decoder_specs: list[dict]) -> dict[str, Decoder]:
         name = spec.get("name")
         params = spec.get("params", {}) or {}
         
-        # Support 'type' field to allow multiple instances of the same decoder class
+        # Support 'type' or 'name' field to allow multiple instances of the same decoder class
         # e.g. name="relay-bp-1", params={"type": "relay-bp", ...}
-        decoder_type = params.get("type", name)
+        # User also wants to use 'name' field in YAML to specify the type.
+        decoder_type = params.get("type", params.get("name", name))
         
         # Create a copy of params to avoid modifying the original spec
-        # and remove 'type' so it doesn't get passed to constructors if they don't expect it
+        # and remove 'type'/'name' so it doesn't get passed to constructors if they don't expect it
         decoder_params = params.copy()
         if "type" in decoder_params:
             del decoder_params["type"]
+        if "name" in decoder_params:
+            del decoder_params["name"]
 
         if decoder_type in {"relay-bp", "mem-bp", "msl-bp", "harmonized-bp"}:
             # Reuse sinter_decoders factory (single extraction)
