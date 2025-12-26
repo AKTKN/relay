@@ -711,6 +711,8 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         # --- Detail handling ---
         mean_iterations = np.zeros(len(results), dtype=float)
         std_iterations = np.zeros(len(results), dtype=float)
+        correction_hammingweight_list = []
+        correction_weight_list = []
         switch_count = 0
         switch_reason = ''
         correction_change = 0
@@ -718,11 +720,14 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
         # Track rows where Tesseract overrides BP so we can handle biases correctly later.
         used_tesseract = np.zeros(len(results), dtype=bool)
 
+        # Get error_priors (LLR) for computing correction weights
+        error_priors = self.check_matrices.error_priors
+
         # # === DEBUG: Prediction before and after observable bias ===
         # predictions_before_bias = predictions.copy()
 
         # --- Switching logic ---
-        for i, res in enumerate(results):
+        for i, res in enumerate(results):   
             # Extract mean_iteration and std_iteration from extra if available
             mean_iter = None
             std_iter = None
@@ -794,6 +799,8 @@ class SinterReTesseractCompiledDecoder(CompiledDecoder):
             switch_count=switch_count,
             switch_resason=switch_reason,
             correction_change_count=correction_change,
+            # correction_hammingweight=correction_hammingweight,
+            # correction_weight=correction_weight,
         )
  
 

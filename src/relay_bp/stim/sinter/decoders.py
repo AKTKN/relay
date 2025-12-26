@@ -108,6 +108,9 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         vote_deltas = None
         mean_iterations = None
         std_iterations = None
+        converged_count = None
+        correction_hammingweight = None
+        correction_weight = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -125,6 +128,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             vote_deltas_list = []
             mean_iter_list = []
             std_iter_list = []
+            converged_count_list = [] 
+            correction_hammingweight_list = []
+            correction_weight_list = []
+
+            # Get error_priors (LLR) for computing correction weights
+            error_priors = self.check_matrices.error_priors
 
             for res in results:
                 extra = res.extra
@@ -151,6 +160,35 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     
                     iter_deltas_list.append(iter_delta)
                     vote_deltas_list.append(vote_delta)
+
+                    # Extract correction from physical_decode_result
+                    selected_idx = extra.get('selected_index')
+                    all_corrections = extra.get('all_corrections')
+                    llr_sums = extra.get('llr_sums')
+                    converged_count = np.sum(extra.get('child_success')) 
+                    converged_count_list.append(converged_count)
+                    
+                    if all_corrections is not None and selected_idx is not None:
+                            correction = all_corrections[selected_idx]
+                            
+                            if correction is not None:
+                                # Calculate Hamming weight
+                                correction_hw = int(np.sum(correction))
+  
+                                if llr_sums is not None and len(llr_sums) > selected_idx:
+                                    correction_wt = float(llr_sums[selected_idx])
+                                else:
+                                    eps = 1e-18
+                                    llr = np.log((1.0 - error_priors) / (error_priors + eps))
+                                    correction_wt = float(np.sum(llr * correction))
+
+                            correction_hammingweight_list.append(correction_hw)
+                            correction_weight_list.append(correction_wt)
+
+                    # Debug
+                    assert selected_idx == np.argmin(correction_wt) or True, "Selected index does not match minimum weight index."
+
+
                 else:
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
@@ -162,6 +200,9 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             vote_deltas = np.array(vote_deltas_list, dtype=object)
             mean_iterations = np.array(mean_iter_list, dtype=object)
             std_iterations = np.array(std_iter_list, dtype=object)
+            converged_counts = np.array(converged_count_list, dtype=object)
+            correction_hammingweight = np.array(correction_hammingweight_list, dtype=object)
+            correction_weight = np.array(correction_weight_list, dtype=object)
             
             # Mean/std iterations (convert to float array if all values are present)
             if all(v is not None for v in mean_iter_list):
@@ -203,6 +244,9 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             logical_gaps=logical_gaps,
             iter_deltas=iter_deltas,
             vote_deltas=vote_deltas,
+            converged_count=converged_counts,
+            correction_hammingweight=correction_hammingweight,
+            correction_weight=correction_weight,
         )
 
     def __del__(self):

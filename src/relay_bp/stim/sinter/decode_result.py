@@ -20,6 +20,9 @@ class DecodeResult:
     switch_count: Optional[int] = None   # Number of shots switched to Tesseract
     switch_resason: Optional[str] = None # Trigger code (1: NoConv, 2: Gap, 3 : MeanIter, 4: StdIter), if mulpile reasons, wrtie as "2434" including all reasons for all shots.   
     correction_change_count: Optional[int] = None # Number of bits changed in correction when switching to Tesseract
+    converged_count: Optional[np.ndarray] = None  # Number of child decoders that converged per shot
+    correction_hammingweight: Optional[np.ndarray] = None  # Hamming weight of the estimated error (correction) per shot
+    correction_weight: Optional[np.ndarray] = None  # Total LLR of the estimated error (correction) per shot
 
     def has_detailed_stats(self) -> bool:
         return self.iterations is not None
