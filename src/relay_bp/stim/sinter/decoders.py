@@ -108,7 +108,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         vote_deltas = None
         mean_iterations = None
         std_iterations = None
-        converged_count = None
+        converged_counts = None
         correction_hammingweight = None
         correction_weight = None
 
