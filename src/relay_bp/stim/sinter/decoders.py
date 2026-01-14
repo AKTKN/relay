@@ -45,10 +45,14 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         leave_progress_bar_on_finish: bool = False,
         get_detail: bool = False,
         save_detail_path: Optional[pathlib.Path] = None,
+        local_ambiguity_threshold: float = 0.0,
     ):
         self.observable_decoder = observable_decoder
         self.parallel = parallel
         self.check_matrices = check_matrices
+        # Hack to pass threshold to decode_shots_bit_packed
+        self.check_matrices.local_ambiguity_threshold = local_ambiguity_threshold
+        
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
         self.get_detail = get_detail
@@ -131,11 +135,66 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             converged_count_list = [] 
             correction_hammingweight_list = []
             correction_weight_list = []
+            local_ambiguity_score_list = []
 
             # Get error_priors (LLR) for computing correction weights
+            # Calculate prior LLRs: ln((1-p)/p)
+            eps = 1e-18
             error_priors = self.check_matrices.error_priors
+            prior_llrs = np.log((1.0 - error_priors) / (error_priors + eps))
+
+            # Threshold for filtering posterior LLRs. 
+            # If 0.0, all indices are considered.
+            # If > 0.0, only indices where |posterior_llr| <= threshold (ambiguous bits) are considered ? 
+            # Or |posterior_llr| >= threshold ? 
+            # The user said: "consider only posterior LLRs larger than threshold".
+            # "事後LLRの絶対値に対してthresholdを設けて、上記の和を取るときに、thresholdよりも大きい事後LLRのみを対称とする"
+            # -> This likely means we only sum up prior LLRs for bits that are "confident enough" (large posterior LLR)
+            # OR typically "ambiguity" implies focusing on bits with SMALL posterior LLRs (uncertain). 
+            # But the user specifically asked for "larger than threshold". I will follow the user's instruction literally: 
+            # target = {i | |posterior_llr[i]| > threshold }. 
+            # Then sum += prior_llr[i] for i in target.
+            
+            # Wait, "local ambiguity score" usually implies summing up risk or ambiguity.
+            # If I follow the user's previous logic: "sum of inverse posterior LLRs" -> low LLR = high score = high ambiguity.
+            # Now user says: "sum of PRIOR LLRs". and "only for posterior LLRs > threshold".
+            # If threshold is 0, we sum prior LLRs for all neighbors.
+            # If threshold is high, we sum prior LLRs only for neighbors that are "confident" (high posterior LLR).
+            # This seems counter-intuitive for an "ambiguity" score if increasing threshold filters out low-confidence bits.
+            # However, maybe the user wants to filter out bits that are *too* ambiguous (close to 0) or bits that are *too* certain?
+            
+            # User instruction: "thresholdよりも大きい事後LLRのみを対称とする"
+            # Literal translation: "target only posterior LLRs larger than threshold".
+            # I will implement as requested: filter condition is `abs(posterior_llr) > threshold`.
+            
+            local_ambiguity_threshold = getattr(self.check_matrices, 'local_ambiguity_threshold', 0.0)
 
             for res in results:
+                # Calculate local ambiguity score
+                score = None
+                phys_res = res.physical_decode_result
+                if phys_res is not None:
+                     indices = phys_res.bad_syndrome_neighbour_indices
+                     post_llrs = phys_res.posterior_ratios
+                     print(f"debug: posterior_llrs: {post_llrs}, average: {np.mean(np.abs(post_llrs))}, std: {np.std(post_llrs)}")
+                     if indices is not None and post_llrs is not None:
+                         # Filter indices based on posterior LLR threshold
+                         # We select indices where |posterior_llr| > threshold
+                         
+                         valid_indices = []
+                         for idx in indices:
+                             if abs(post_llrs[idx]) > local_ambiguity_threshold:
+                                 valid_indices.append(idx)
+                         
+                         if valid_indices:
+                             # Sum of *prior* LLRs for these indices
+                             # prior_llrs is derived from error_priors
+                             vals = prior_llrs[valid_indices]
+                             score = float(np.sum(vals))
+                         else:
+                             score = 0.0
+                local_ambiguity_score_list.append(score)
+
                 extra = res.extra
                 if extra is not None:
                     selected_iter = extra.get('selected_coset_avg_iter')
@@ -203,7 +262,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             converged_counts = np.array(converged_count_list, dtype=object)
             correction_hammingweight = np.array(correction_hammingweight_list, dtype=object)
             correction_weight = np.array(correction_weight_list, dtype=object)
-            
+            local_ambiguity_score = np.array(local_ambiguity_score_list, dtype=object)
+
             # Mean/std iterations (convert to float array if all values are present)
             if all(v is not None for v in mean_iter_list):
                 mean_iterations = np.array(mean_iter_list, dtype=float)
@@ -247,6 +307,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             converged_count=converged_counts,
             correction_hammingweight=correction_hammingweight,
             correction_weight=correction_weight,
+            local_ambiguity_score=local_ambiguity_score,
         )
 
     def __del__(self):
@@ -266,6 +327,7 @@ class SinterDecoder_BaseBP(Decoder):
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
         get_detail_result: bool = False,
+        local_ambiguity_threshold: float = 0.0,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.parallel = parallel
@@ -275,6 +337,7 @@ class SinterDecoder_BaseBP(Decoder):
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
         self.get_detail_result = get_detail_result
+        self.local_ambiguity_threshold = local_ambiguity_threshold
 
     def build_observable_decoder(
         self, dem: stim.DetectorErrorModel
@@ -298,6 +361,7 @@ class SinterDecoder_BaseBP(Decoder):
             show_progress=self.show_progress,
             leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
             get_detail=self.get_detail_result,
+            local_ambiguity_threshold=getattr(self, 'local_ambiguity_threshold', 0.0),
         )
 
 
@@ -400,6 +464,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         abs_llr_threshold: float = None,
         pulse_per_leg: int = None,
         start_leg: int = None,
+        local_ambiguity_threshold: float = 0.0,
         # --- BaseBP parameters ---
         parallel: bool = False,
         decomposed_hyperedges: bool | None = None,
@@ -422,6 +487,7 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.selection_strategy = selection_strategy
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
+        self.local_ambiguity_threshold = local_ambiguity_threshold
         self.use_automorphism = use_automorphism
         self.ensemble_mode = ensemble_mode
         self.repulsive_size = repulsive_size

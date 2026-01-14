@@ -250,6 +250,7 @@ pub struct DecodeResult {
     pub iterations: usize,
     pub max_iter: usize,
     pub logical_gap: Option<f64>,
+    pub bad_syndrome_neighbour_indices: Option<Vec<usize>>,
     pub extra: BPExtraResult,
 }
 

@@ -122,6 +122,11 @@ impl DecodeResult {
     pub fn max_iter(&self) -> usize {
         self.inner.max_iter
     }
+
+    #[getter]
+    pub fn bad_syndrome_neighbour_indices<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<usize>>> {
+        self.inner.bad_syndrome_neighbour_indices.as_ref().map(|v| PyArray1::from_slice(py, v))
+    }
 }
 
 /// A Python module implemented in Rust.

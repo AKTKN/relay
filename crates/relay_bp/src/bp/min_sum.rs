@@ -19,6 +19,7 @@ use num_traits::{Bounded, Signed, ToPrimitive};
 use sprs::CsMatView;
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct MinSumDecoderConfig {
@@ -491,7 +492,26 @@ where
         success: bool,
         decoded_detectors: Array1<Bit>,
         max_iter: usize,
+        detectors: Option<ArrayView1<Bit>>,
     ) -> DecodeResult {
+        let bad_syndrome_neighbour_indices = if let Some(dets) = detectors {
+            let mut neighbors_set = HashSet::new();
+            for (check_idx, val) in dets.iter().enumerate() {
+                if *val == 1 {
+                    if let Some(row) = self.check_to_variable.outer_view(check_idx) {
+                        for &col_idx in row.indices() {
+                            neighbors_set.insert(col_idx);
+                        }
+                    }
+                }
+            }
+            let mut v: Vec<usize> = neighbors_set.into_iter().collect();
+            v.sort();
+            Some(v)
+        } else {
+            None
+        };
+
         DecodeResult {
             decoding: self.decoding.clone(),
             decoded_detectors,
@@ -511,6 +531,7 @@ where
             iterations: self.current_iteration,
             max_iter,
             logical_gap: None,
+            bad_syndrome_neighbour_indices,
             extra: BPExtraResult::None,
         }
     }
@@ -619,7 +640,7 @@ where
             }
         }
 
-        self.build_result(success, decoded_detectors, self.config.max_iter)
+        self.build_result(success, decoded_detectors, self.config.max_iter, Some(detectors))
     }
 }
 

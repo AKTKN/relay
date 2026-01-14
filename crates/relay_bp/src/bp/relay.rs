@@ -361,7 +361,7 @@ where
         }
 
         self.bp_decoder
-            .build_result(success, decoded_detectors, max_iter)
+            .build_result(success, decoded_detectors, max_iter, Some(detectors))
     }
 
     fn write_log(&mut self, file: File) {
