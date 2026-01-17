@@ -67,6 +67,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             'runner_up_coset_votes': [],
         }
 
+    @property
+    def observables_matrix(self):
+        return self.check_matrices.observables_matrix
+
     def _save_accumulated_details(self):
         if self.save_detail_path is None or not self.accumulated_details['converged']:
             return
@@ -115,6 +119,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         converged_counts = None
         correction_hammingweight = None
         correction_weight = None
+        lsd = None
+        local_ambiguity_score = None
+        bp_runtime_micros = None
+        lsd_runtime_micros = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -127,7 +135,6 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             converged = np.array([res.converged for res in results])
             logical_gaps = np.array([res.logical_gap for res in results])
 
-            # 差分メトリックの計算
             iter_deltas_list = []
             vote_deltas_list = []
             mean_iter_list = []
@@ -136,6 +143,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             correction_hammingweight_list = []
             correction_weight_list = []
             local_ambiguity_score_list = []
+            lsd_list = []
+            bp_runtime_list = []
+            lsd_runtime_list = []
+            decoding_list = []
 
             # Get error_priors (LLR) for computing correction weights
             # Calculate prior LLRs: ln((1-p)/p)
@@ -143,44 +154,55 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             error_priors = self.check_matrices.error_priors
             prior_llrs = np.log((1.0 - error_priors) / (error_priors + eps))
 
-            # Threshold for filtering posterior LLRs. 
-            # If 0.0, all indices are considered.
-            # If > 0.0, only indices where |posterior_llr| <= threshold (ambiguous bits) are considered ? 
-            # Or |posterior_llr| >= threshold ? 
-            # The user said: "consider only posterior LLRs larger than threshold".
-            # "事後LLRの絶対値に対してthresholdを設けて、上記の和を取るときに、thresholdよりも大きい事後LLRのみを対称とする"
-            # -> This likely means we only sum up prior LLRs for bits that are "confident enough" (large posterior LLR)
-            # OR typically "ambiguity" implies focusing on bits with SMALL posterior LLRs (uncertain). 
-            # But the user specifically asked for "larger than threshold". I will follow the user's instruction literally: 
-            # target = {i | |posterior_llr[i]| > threshold }. 
-            # Then sum += prior_llr[i] for i in target.
-            
-            # Wait, "local ambiguity score" usually implies summing up risk or ambiguity.
-            # If I follow the user's previous logic: "sum of inverse posterior LLRs" -> low LLR = high score = high ambiguity.
-            # Now user says: "sum of PRIOR LLRs". and "only for posterior LLRs > threshold".
-            # If threshold is 0, we sum prior LLRs for all neighbors.
-            # If threshold is high, we sum prior LLRs only for neighbors that are "confident" (high posterior LLR).
-            # This seems counter-intuitive for an "ambiguity" score if increasing threshold filters out low-confidence bits.
-            # However, maybe the user wants to filter out bits that are *too* ambiguous (close to 0) or bits that are *too* certain?
-            
-            # User instruction: "thresholdよりも大きい事後LLRのみを対称とする"
-            # Literal translation: "target only posterior LLRs larger than threshold".
-            # I will implement as requested: filter condition is `abs(posterior_llr) > threshold`.
-            
             local_ambiguity_threshold = getattr(self.check_matrices, 'local_ambiguity_threshold', 0.0)
 
             for res in results:
+                phys_res = res.physical_decode_result
+                
+                lsd_val = None
+                if phys_res is not None:
+                    lsd_obj = getattr(phys_res, 'lsd', None)
+                    if lsd_obj is not None:
+                        lsd_val = {
+                            'cluster_sizes': lsd_obj.cluster_sizes,
+                            'cluster_llrs': lsd_obj.cluster_llrs,
+                            'cluster_ids': lsd_obj.cluster_ids,
+                            'elapsed_time_micros': lsd_obj.elapsed_time_micros,
+                            'lsd_correction': lsd_obj.lsd_correction
+                        }
+                        lsd_time_us = lsd_obj.elapsed_time_micros
+                    else:
+                        lsd_time_us = None
+                else:
+                    lsd_time_us = None
+                lsd_list.append(lsd_val)
+                lsd_runtime_list.append(lsd_time_us)
+
+                if phys_res is not None:
+                    decoding_list.append(phys_res.decoding)
+                else:
+                    decoding_list.append(None)
+
+                bp_time_us = None
+                if phys_res is not None:
+                    bp_time_us = getattr(phys_res, 'run_time_micros', None)
+                    if bp_time_us is None:
+                        # DEBUG
+                        print(f"DEBUG: run_time_micros is None. phys_res type: {type(phys_res)}")
+                        if hasattr(phys_res, 'run_time_micros'):
+                            print(f"DEBUG: phys_res has run_time_micros but it is None")
+                        else:
+                            print(f"DEBUG: phys_res does not have run_time_micros. Dir: {dir(phys_res)}")
+                bp_runtime_list.append(bp_time_us)
+
                 # Calculate local ambiguity score
                 score = None
-                phys_res = res.physical_decode_result
                 if phys_res is not None:
                      indices = phys_res.bad_syndrome_neighbour_indices
                      post_llrs = phys_res.posterior_ratios
-                     print(f"debug: posterior_llrs: {post_llrs}, average: {np.mean(np.abs(post_llrs))}, std: {np.std(post_llrs)}")
                      if indices is not None and post_llrs is not None:
                          # Filter indices based on posterior LLR threshold
                          # We select indices where |posterior_llr| > threshold
-                         
                          valid_indices = []
                          for idx in indices:
                              if abs(post_llrs[idx]) > local_ambiguity_threshold:
@@ -247,7 +269,6 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     # Debug
                     assert selected_idx == np.argmin(correction_wt) or True, "Selected index does not match minimum weight index."
 
-
                 else:
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
@@ -263,6 +284,13 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             correction_hammingweight = np.array(correction_hammingweight_list, dtype=object)
             correction_weight = np.array(correction_weight_list, dtype=object)
             local_ambiguity_score = np.array(local_ambiguity_score_list, dtype=object)
+            lsd = np.array(lsd_list, dtype=object)
+            bp_runtime_micros = np.array(bp_runtime_list, dtype=object)
+            lsd_runtime_micros = np.array(lsd_runtime_list, dtype=object)
+            decoding = np.array(decoding_list, dtype=object)
+
+            if all(v is not None for v in decoding_list):
+                decoding = np.array(decoding_list, dtype=np.uint8)
 
             # Mean/std iterations (convert to float array if all values are present)
             if all(v is not None for v in mean_iter_list):
@@ -297,6 +325,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         
         return DecodeResult(
             predictions=outputs,
+            decoding=decoding,
             iterations=iterations,
             converged=converged,
             mean_iterations=mean_iterations,
@@ -308,10 +337,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             correction_hammingweight=correction_hammingweight,
             correction_weight=correction_weight,
             local_ambiguity_score=local_ambiguity_score,
+            lsd=lsd,
+            bp_runtime_micros=bp_runtime_micros,
+            lsd_runtime_micros=lsd_runtime_micros,
         )
 
     def __del__(self):
-        """デストラクタで蓄積したデータを保存"""
         if hasattr(self, 'save_detail_path') and self.save_detail_path is not None:
             self._save_accumulated_details()
 
@@ -465,6 +496,10 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         pulse_per_leg: int = None,
         start_leg: int = None,
         local_ambiguity_threshold: float = 0.0,
+        # --- LSD parameters ---
+        enable_lsd: bool = False,
+        lsd_order: int = 0,
+        lsd_method: int = 0,
         # --- BaseBP parameters ---
         parallel: bool = False,
         decomposed_hyperedges: bool | None = None,
@@ -488,6 +523,9 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
         self.local_ambiguity_threshold = local_ambiguity_threshold
+        self.enable_lsd = enable_lsd
+        self.lsd_order = lsd_order
+        self.lsd_method = lsd_method
         self.use_automorphism = use_automorphism
         self.ensemble_mode = ensemble_mode
         self.repulsive_size = repulsive_size
@@ -572,6 +610,9 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             abs_llr_threshold=self.abs_llr_threshold,
             pulse_per_leg=self.pulse_per_leg,
             start_leg=self.start_leg,
+            enable_lsd=self.enable_lsd,
+            lsd_order=self.lsd_order,
+            lsd_method=self.lsd_method,
         )
         return observable_decoder
     
@@ -589,6 +630,10 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         stop_nconv: int = 5,
         stopping_criterion: str = "nconv",
         logging=False,
+        # --- LSD parameters ---
+        enable_lsd: bool = False,
+        lsd_order: int = 0,
+        lsd_method: int = 0,
         parallel: bool = False,
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
@@ -607,6 +652,9 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         self.stop_nconv = stop_nconv
         self.stopping_criterion = stopping_criterion
         self.logging = logging
+        self.enable_lsd = enable_lsd
+        self.lsd_order = lsd_order
+        self.lsd_method = lsd_method
         self.get_detail = get_detail
         self.seed = np.random.randint(0, 2**32 - 1) if seed is None else seed
         super().__init__(
@@ -635,6 +683,9 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
             stopping_criterion=self.stopping_criterion,
             logging=self.logging,
             seed=self.seed, 
+            enable_lsd=self.enable_lsd,
+            lsd_order=self.lsd_order,
+            lsd_method=self.lsd_method,
         )
 
         observable_decoder = relay_bp.ObservableDecoderRunner(

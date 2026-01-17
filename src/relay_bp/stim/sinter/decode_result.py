@@ -10,6 +10,7 @@ import numpy as np
 @dataclass
 class DecodeResult:
     predictions: np.ndarray # final prediction
+    decoding: Optional[np.ndarray] = None  # Physical correction per shot (num_bits)
     iterations: Optional[np.ndarray] = None # Number of iterations taken by RelayBP decoder
     converged: Optional[np.ndarray] = None  # Whether RelayBP decoder converged
     mean_iterations: Optional[np.ndarray] = None  # Mean iterations from ensemble RelayBP decoder
@@ -24,6 +25,9 @@ class DecodeResult:
     correction_hammingweight: Optional[np.ndarray] = None  # Hamming weight of the estimated error (correction) per shot
     correction_weight: Optional[np.ndarray] = None  # Total LLR of the estimated error (correction) per shot
     local_ambiguity_score: Optional[np.ndarray] = None  # Sum of inverse posterior LLRs of variable nodes adjacent to non-trivial syndromes
+    lsd: Optional[np.ndarray] = None # LSD result
+    bp_runtime_micros: Optional[np.ndarray] = None
+    lsd_runtime_micros: Optional[np.ndarray] = None
 
     def has_detailed_stats(self) -> bool:
         return self.iterations is not None

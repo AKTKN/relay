@@ -251,7 +251,10 @@ pub struct DecodeResult {
     pub max_iter: usize,
     pub logical_gap: Option<f64>,
     pub bad_syndrome_neighbour_indices: Option<Vec<usize>>,
+    /// Execution time for the entire decoding run in microseconds
+    pub run_time_micros: Option<u64>,
     pub extra: BPExtraResult,
+    pub lsd: Option<LsdResult>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -325,4 +328,19 @@ pub struct EnsembleExtraResult {
     /// None if at least one decoder converged
     #[serde(default)]
     pub residual_result: Option<Vec<Array1<Bit>>>,
+}
+
+// Add this struct definition
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LsdResult {
+    /// Size of each valid cluster found
+    pub cluster_sizes: Vec<usize>,
+    /// Sum of absolute LLRs in each cluster
+    pub cluster_llrs: Vec<f64>,
+    /// Final cluster assignment for every bit (0 = none, 1+ = cluster_id)
+    pub cluster_ids: Vec<usize>,
+    /// Execution time for the LSD step in microseconds
+    pub elapsed_time_micros: u64,
+    /// The corrected error pattern relative to the LSD method
+    pub lsd_correction: Option<Array1<Bit>>,
 }

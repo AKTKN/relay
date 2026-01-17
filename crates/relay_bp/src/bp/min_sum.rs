@@ -9,7 +9,7 @@
 // that they have been altered from the originals.
 
 use crate::bipartite_graph::SparseBipartiteGraph;
-use crate::decoder::{BPExtraResult, DecodeResult, Decoder, DecoderRunner};
+use crate::decoder::{BPExtraResult, DecodeResult, Decoder, DecoderRunner, LsdResult};
 use crate::decoder::{Bit, SparseBitMatrix};
 use itertools::izip;
 use log::debug;
@@ -18,6 +18,7 @@ use num_traits::FromPrimitive;
 use num_traits::{Bounded, Signed, ToPrimitive};
 use sprs::CsMatView;
 use std::fmt::Debug;
+use std::time::Instant;
 use std::sync::Arc;
 use std::collections::HashSet;
 
@@ -32,6 +33,9 @@ pub struct MinSumDecoderConfig {
     pub max_data_value: Option<f64>,
     pub int_bits: Option<isize>,
     pub frac_bits: Option<isize>,
+    pub enable_lsd: bool,
+    pub lsd_order: usize,
+    pub lsd_method: String,
 }
 
 impl Default for MinSumDecoderConfig {
@@ -46,6 +50,9 @@ impl Default for MinSumDecoderConfig {
             max_data_value: None,
             int_bits: None,
             frac_bits: None,
+            enable_lsd: false,
+            lsd_order: 0,
+            lsd_method: "LSD_0".to_string(),
         }
     }
 }
@@ -274,6 +281,13 @@ where
                 .iter_mut()
                 .for_each(|(col_ind, val)| *val = self.log_prior_ratios[col_ind]);
         }
+
+        // NOTE: legacy path kept for quick rollback
+        // for mut row_vec in self.variable_to_check.outer_iterator_mut() {
+        //     row_vec
+        //         .iter_mut()
+        //         .for_each(|(col_ind, val)| *val = self.log_prior_ratios[col_ind]);
+        // }
     }
 
     pub fn initialize_check_to_variable(&mut self) {
@@ -282,6 +296,13 @@ where
                 .iter_mut()
                 .for_each(|(_row_ind, val)| *val = N::zero());
         }
+
+        // NOTE: legacy path kept for quick rollback
+        // for mut col_vec in self.check_to_variable.outer_iterator_mut() {
+        //     col_vec
+        //         .iter_mut()
+        //         .for_each(|(_row_ind, val)| *val = N::zero());
+        // }
     }
 
     pub fn initialize_memory_strengths(&mut self) {
@@ -366,17 +387,20 @@ where
 
             debug!("Variable messages for row {var_check_row_ind:?}: {var_check_row_vec:?}");
 
-            // Iterate over the row's storage indices
+            // Iterate over the row's storage indices (optimized)
             let data_range = self
                 .variable_to_check
                 .indptr()
                 .outer_inds(var_check_row_ind);
+            let start = data_range.start;
+            let end = data_range.end;
+            let indices = &self.variable_to_check.indices()[start..end];
+            let data = &self.variable_to_check.data()[start..end];
 
-            for (ind, var_check_col_ind, var_check_col_val) in izip!(
-                data_range.clone(),
-                &self.variable_to_check.indices()[data_range.clone()],
-                &self.variable_to_check.data()[data_range.clone()]
-            ) {
+            for (offset, (var_check_col_ind, var_check_col_val)) in
+                indices.iter().zip(data.iter()).enumerate()
+            {
+                let ind = start + offset;
                 // Extract the sign from the accumulated sign.
                 let check_to_variable_sign = accumulated_sign ^ var_check_col_val.is_negative();
                 let check_to_variable_min: N = if *var_check_col_ind != min_ind {
@@ -395,6 +419,26 @@ where
                 self.check_to_variable.data_mut()[self.variable_to_check_nnz_map[ind]] =
                     check_to_variable;
             }
+
+            // NOTE: legacy path kept for quick rollback
+            // for (ind, var_check_col_ind, var_check_col_val) in izip!(
+            //     data_range.clone(),
+            //     &self.variable_to_check.indices()[data_range.clone()],
+            //     &self.variable_to_check.data()[data_range.clone()]
+            // ) {
+            //     let check_to_variable_sign = accumulated_sign ^ var_check_col_val.is_negative();
+            //     let check_to_variable_min: N = if *var_check_col_ind != min_ind {
+            //         min_message
+            //     } else {
+            //         second_min_message
+            //     };
+            //     let mut check_to_variable = alpha * check_to_variable_min;
+            //     if check_to_variable_sign {
+            //         check_to_variable = check_to_variable.neg();
+            //     }
+            //     self.check_to_variable.data_mut()[self.variable_to_check_nnz_map[ind]] =
+            //         check_to_variable;
+            // }
         }
 
         if let Some(scale_val) = self.data_scale_value {
@@ -435,12 +479,13 @@ where
                 .check_to_variable
                 .indptr()
                 .outer_inds(check_var_col_ind);
+            let start = data_range.start;
+            let end = data_range.end;
+            let data = &self.check_to_variable.data()[start..end];
 
-            // Perform iteration in the forward direction to accumulate left to right
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            ) {
+            // Perform iteration in the forward direction to accumulate left to right (optimized)
+            for (offset, check_var_row_val) in data.iter().enumerate() {
+                let ind = start + offset;
                 self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
                     check_to_var_row_sum;
                 check_to_var_row_sum += *check_var_row_val;
@@ -448,15 +493,10 @@ where
 
             self.posterior_ratios[check_var_col_ind] = check_to_var_row_sum;
 
-            // Now perform iteration in the reverse direction to accumulate right to left
+            // Now perform iteration in the reverse direction to accumulate right to left (optimized)
             check_to_var_row_sum = N::zero();
-            // Remove each messages contribution
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            )
-            .rev()
-            {
+            for (offset, check_var_row_val) in data.iter().enumerate().rev() {
+                let ind = start + offset;
                 let map_ind = self.check_to_variable_nnz_map[ind];
                 self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
                 check_to_var_row_sum += *check_var_row_val;
@@ -470,6 +510,33 @@ where
                     self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
                 );
             }
+
+            // NOTE: legacy path kept for quick rollback
+            // for (ind, check_var_row_val) in izip!(
+            //     data_range.clone(),
+            //     &self.check_to_variable.data()[data_range.clone()]
+            // ) {
+            //     self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
+            //         check_to_var_row_sum;
+            //     check_to_var_row_sum += *check_var_row_val;
+            // }
+            // check_to_var_row_sum = N::zero();
+            // for (ind, check_var_row_val) in izip!(
+            //     data_range.clone(),
+            //     &self.check_to_variable.data()[data_range.clone()]
+            // )
+            // .rev()
+            // {
+            //     let map_ind = self.check_to_variable_nnz_map[ind];
+            //     self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
+            //     check_to_var_row_sum += *check_var_row_val;
+            //     debug!(
+            //         "location ({:?}, {:?}), variable_to_check: {:.32}",
+            //         self.check_to_variable.indices()[ind],
+            //         check_var_col_ind,
+            //         self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
+            //     );
+            // }
         }
 
         self.bound_magnitudes();
@@ -493,24 +560,47 @@ where
         decoded_detectors: Array1<Bit>,
         max_iter: usize,
         detectors: Option<ArrayView1<Bit>>,
+        lsd: Option<LsdResult>,
     ) -> DecodeResult {
         let bad_syndrome_neighbour_indices = if let Some(dets) = detectors {
-            let mut neighbors_set = HashSet::new();
+            let mut seen = vec![false; self.check_matrix.cols()];
+            let mut neighbors: Vec<usize> = Vec::new();
             for (check_idx, val) in dets.iter().enumerate() {
                 if *val == 1 {
                     if let Some(row) = self.check_to_variable.outer_view(check_idx) {
                         for &col_idx in row.indices() {
-                            neighbors_set.insert(col_idx);
+                            if !seen[col_idx] {
+                                seen[col_idx] = true;
+                                neighbors.push(col_idx);
+                            }
                         }
                     }
                 }
             }
-            let mut v: Vec<usize> = neighbors_set.into_iter().collect();
-            v.sort();
-            Some(v)
+            neighbors.sort();
+            Some(neighbors)
         } else {
             None
         };
+
+        // NOTE: legacy path kept for quick rollback
+        // let bad_syndrome_neighbour_indices = if let Some(dets) = detectors {
+        //     let mut neighbors_set = HashSet::new();
+        //     for (check_idx, val) in dets.iter().enumerate() {
+        //         if *val == 1 {
+        //             if let Some(row) = self.check_to_variable.outer_view(check_idx) {
+        //                 for &col_idx in row.indices() {
+        //                     neighbors_set.insert(col_idx);
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     let mut v: Vec<usize> = neighbors_set.into_iter().collect();
+        //     v.sort();
+        //     Some(v)
+        // } else {
+        //     None
+        // };
 
         DecodeResult {
             decoding: self.decoding.clone(),
@@ -532,21 +622,35 @@ where
             max_iter,
             logical_gap: None,
             bad_syndrome_neighbour_indices,
+            run_time_micros: None,
             extra: BPExtraResult::None,
+            lsd,
         }
     }
     fn bound_magnitudes(&mut self) {
         // Bound magnitudes
-        if self.max_data_value.is_some() {
-            let max_val = self.max_data_value.unwrap();
-            self.variable_to_check
-                .data_mut()
-                .iter_mut()
-                .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
-            self.posterior_ratios
-                .iter_mut()
-                .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
-        }
+        let Some(max_val) = self.max_data_value else {
+            return;
+        };
+        self.variable_to_check
+            .data_mut()
+            .iter_mut()
+            .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
+        self.posterior_ratios
+            .iter_mut()
+            .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
+
+        // NOTE: legacy path kept for quick rollback
+        // if self.max_data_value.is_some() {
+        //     let max_val = self.max_data_value.unwrap();
+        //     self.variable_to_check
+        //         .data_mut()
+        //         .iter_mut()
+        //         .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
+        //     self.posterior_ratios
+        //         .iter_mut()
+        //         .for_each(|v| *v = Self::bound_value_magnitude(*v, max_val));
+        // }
     }
 
     fn bound_value_magnitude(value: N, max_val: N) -> N
@@ -568,6 +672,11 @@ where
         }
         debug!("Posteriors: {:?}", self.posterior_ratios);
         debug!("Hard decision: {:?}", self.decoding);
+
+        // NOTE: legacy path kept for quick rollback
+        // for (idx, posterior) in self.posterior_ratios.iter().enumerate() {
+        //     self.decoding[idx] = Bit::from((*posterior) <= N::zero());
+        // }
     }
 
     pub fn compute_decoded_detectors(&self) -> Array1<Bit> {
@@ -622,6 +731,7 @@ where
     }
 
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        let start_time = Instant::now();
         // Initialize probability ratios
         self.initialize_decoder();
         let mut success: bool = false;
@@ -639,8 +749,26 @@ where
                 break;
             }
         }
+        let bp_duration = start_time.elapsed().as_micros() as u64;
 
-        self.build_result(success, decoded_detectors, self.config.max_iter, Some(detectors))
+        let lsd_result = if self.config.enable_lsd {
+            let posterior_ratios_f64 = self.get_posterior_ratios_f64();
+            let prior_ratios_f64 = self.config.log_prior_ratios();
+            Some(crate::bp::lsd::run_lsd(
+                &self.check_matrix,
+                &detectors.to_owned(),
+                &posterior_ratios_f64,
+                &prior_ratios_f64,
+                self.config.lsd_order,
+                &self.config.lsd_method,
+            ))
+        } else {
+            None
+        };
+
+        let mut result = self.build_result(success, decoded_detectors, self.config.max_iter, Some(detectors), lsd_result);
+        result.run_time_micros = Some(bp_duration);
+        result
     }
 }
 

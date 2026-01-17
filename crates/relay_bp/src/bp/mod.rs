@@ -11,3 +11,4 @@
 pub mod min_sum;
 pub mod min_sum_fixed;
 pub mod relay;
+pub mod lsd;

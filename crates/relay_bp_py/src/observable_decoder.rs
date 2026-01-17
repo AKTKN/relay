@@ -230,7 +230,8 @@ impl ObservableDecoderRunner {
         set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
         stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), 
         perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=None,
-        ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None))]
+        ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None,
+        enable_lsd=false, lsd_order=0, lsd_method=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn with_ensemble_decoder(
         py: Python<'_>,
@@ -263,6 +264,9 @@ impl ObservableDecoderRunner {
         abs_llr_threshold: Option<f64>,
         pulse_per_leg: Option<usize>,
         start_leg: Option<usize>,
+        enable_lsd: bool,
+        lsd_order: usize,
+        lsd_method: usize,
     ) -> PyResult<Self> {
         // 1. Setyp parameters for child decoders
         let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
@@ -299,6 +303,13 @@ impl ObservableDecoderRunner {
 
         let seed = seed.unwrap_or_else(rand::random::<u64>);
 
+        let lsd_method_str = match lsd_method {
+            0 => "LSD_0".to_string(),
+            1 => "LSD_E".to_string(),
+            2 => "LSD_CS".to_string(),
+            _ => "LSD_0".to_string(), // fallback
+        };
+
         let relay_config_templete = RelayDecoderConfig {
             pre_iter, num_sets, set_max_iter, gamma_dist_interval,
             explicit_gammas: explicit_gammas.map(|arr| arr.as_array().to_owned()),
@@ -307,6 +318,9 @@ impl ObservableDecoderRunner {
             abs_llr_threshold: None,
             pulse_per_leg: None,
             start_leg: None,
+            enable_lsd,
+            lsd_order,
+            lsd_method: lsd_method_str.clone(),
         };   
 
         // Perturb error priors 
@@ -373,6 +387,9 @@ impl ObservableDecoderRunner {
                 max_data_value,
                 int_bits: None,
                 frac_bits: None,
+                enable_lsd,
+                lsd_order,
+                lsd_method: lsd_method_str.clone(),
             };
 
             // Create RelayDecoderConfig

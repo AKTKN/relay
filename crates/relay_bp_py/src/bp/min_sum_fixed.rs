@@ -52,6 +52,9 @@ impl MinSumBPDecoderFixed {
             max_data_value,
             int_bits,
             frac_bits,
+            enable_lsd: false,
+            lsd_order: 0,
+            lsd_method: "basic_lsd".to_string(),
         };
 
         let inner_decoder = MinSumBPDecoderFixedInner::new(

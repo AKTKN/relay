@@ -24,6 +24,7 @@ use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use std::process::exit;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum StoppingCriterion {
@@ -53,6 +54,9 @@ pub struct RelayDecoderConfig {
     pub abs_llr_threshold: Option<f64>,
     pub pulse_per_leg: Option<usize>,
     pub start_leg: Option<usize>,
+    pub enable_lsd: bool,
+    pub lsd_order: usize,
+    pub lsd_method: String,
 }
 
 impl Default for RelayDecoderConfig {
@@ -70,6 +74,9 @@ impl Default for RelayDecoderConfig {
             abs_llr_threshold: None,
             pulse_per_leg: None,
             start_leg: None,
+            enable_lsd: false,
+            lsd_order: 0,
+            lsd_method: "LSD_0".to_string(),
         }
     }
 }
@@ -166,7 +173,13 @@ where
         // The actual number of sets Relay ran, depends on the stopping criterion
         let num_executed_sets = 0;
 
-        let bp_decoder = MinSumBPDecoder::new(check_matrix, min_sum_config);
+        // Override LSD settings in MinSum config from Relay config
+        let mut min_sum_config_val = (*min_sum_config).clone();
+        min_sum_config_val.enable_lsd = relay_config.enable_lsd;
+        min_sum_config_val.lsd_order = relay_config.lsd_order;
+        min_sum_config_val.lsd_method = relay_config.lsd_method.clone();
+
+        let bp_decoder = MinSumBPDecoder::new(check_matrix, Arc::new(min_sum_config_val));
 
         let posterior_update_state = Self::init_dismem_state(&relay_config);
 
@@ -330,6 +343,22 @@ where
         (leg_offset - start_leg) % pulse_per_leg == 0
     }
 
+    fn run_lsd_on_result(&self, result: &DecodeResult, detectors: ArrayView1<Bit>) -> Option<crate::decoder::LsdResult> {
+        if self.relay_config.enable_lsd {
+            let prior_ratios = self.bp_decoder.config.log_prior_ratios();
+            Some(crate::bp::lsd::run_lsd(
+                &self.check_matrix(),
+                &detectors.to_owned(),
+                &result.posterior_ratios,
+                &prior_ratios,
+                self.relay_config.lsd_order,
+                &self.relay_config.lsd_method
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Decode with the inner decoder
     /// If is_repulsive_leg is true, apply repulsive gamma for the entire leg
     fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize, is_repulsive_leg: bool) -> DecodeResult {
@@ -361,7 +390,7 @@ where
         }
 
         self.bp_decoder
-            .build_result(success, decoded_detectors, max_iter, Some(detectors))
+            .build_result(success, decoded_detectors, max_iter, Some(detectors), None)
     }
 
     fn write_log(&mut self, file: File) {
@@ -415,6 +444,7 @@ where
     }
 
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        let start_time = Instant::now();
         // Initialization
         let mut num_conv = 0;
         let mut min_pm = f64::MAX;
@@ -461,6 +491,12 @@ where
                         .open("relay_logging.out")
                         .unwrap();
                     self.write_log(file);
+                }
+                let duration = start_time.elapsed().as_micros() as u64;
+                result.run_time_micros = Some(duration);
+
+                if let Some(lsd) = self.run_lsd_on_result(&result, detectors) {
+                    result.lsd = Some(lsd);
                 }
                 return result;
             }
@@ -525,6 +561,13 @@ where
                 .open("relay_logging.out")
                 .unwrap();
             self.write_log(file);
+        }
+
+        let duration = start_time.elapsed().as_micros() as u64;
+        result.run_time_micros = Some(duration);
+
+        if let Some(lsd) = self.run_lsd_on_result(&result, detectors) {
+            result.lsd = Some(lsd);
         }
 
         result

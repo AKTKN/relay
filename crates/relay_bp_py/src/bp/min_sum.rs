@@ -26,7 +26,7 @@ macro_rules! create_bp_interface {
         #[pymethods]
         impl $name {
             #[new]
-            #[pyo3(signature = (check_matrix, error_priors, max_iter=200, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=None, data_scale_value=None, max_data_value=None, int_bits=None, frac_bits=None))]
+            #[pyo3(signature = (check_matrix, error_priors, max_iter=200, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=None, data_scale_value=None, max_data_value=None, int_bits=None, frac_bits=None, enable_lsd=false, lsd_order=0, lsd_method="LSD_0".to_string()))]
             #[allow(clippy::missing_transmute_annotations, clippy::too_many_arguments)]
             pub fn new(
                 py: Python<'_>,
@@ -40,6 +40,9 @@ macro_rules! create_bp_interface {
                 max_data_value: Option<f64>,
                 int_bits: Option<isize>,
                 frac_bits: Option<isize>,
+                enable_lsd: bool,
+                lsd_order: usize,
+                lsd_method: String,
             ) -> PyResult<(Self, DynDecoder)> {
                 let min_sum_decoder = Self {};
 
@@ -53,6 +56,9 @@ macro_rules! create_bp_interface {
                     max_data_value,
                     int_bits,
                     frac_bits,
+                    enable_lsd,
+                    lsd_order,
+                    lsd_method,
                 };
 
 

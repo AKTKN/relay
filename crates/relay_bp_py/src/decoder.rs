@@ -16,7 +16,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods};
 use relay_bp::bipartite_graph::BipartiteGraph;
 use relay_bp::decoder::{
     Bit, DecodeResult as DecodeResultInner, Decoder as DecoderInner, SparseBitMatrix,
-    BPExtraResult, EnsembleExtraResult,
+    BPExtraResult, EnsembleExtraResult, LsdResult as LsdResultInner,
 };
 
 pub fn get_sprs_bit_matrix_from_python(
@@ -71,6 +71,40 @@ pub fn get_sprs_bit_matrix_from_python(
     }
 }
 
+#[pyclass(module = "decoder", name = "LsdResult")]
+#[derive(Clone)]
+pub struct PyLsdResult {
+    inner: LsdResultInner,
+}
+
+#[pymethods]
+impl PyLsdResult {
+    #[getter]
+    pub fn cluster_sizes<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<usize>> {
+        PyArray1::from_vec(py, self.inner.cluster_sizes.clone())
+    }
+
+    #[getter]
+    pub fn cluster_llrs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.cluster_llrs.clone())
+    }
+
+    #[getter]
+    pub fn cluster_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<usize>> {
+        PyArray1::from_vec(py, self.inner.cluster_ids.clone())
+    }
+
+    #[getter]
+    pub fn elapsed_time_micros(&self) -> u64 {
+        self.inner.elapsed_time_micros
+    }
+
+    #[getter]
+    pub fn lsd_correction<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<Bit>>> {
+        self.inner.lsd_correction.as_ref().map(|v| PyArray1::from_array(py, v))
+    }
+}
+
 #[pyclass(subclass, module = "decoder")]
 #[derive(Clone)]
 pub struct DynDecoder(pub Box<dyn DecoderInner + Send + 'static>);
@@ -99,6 +133,12 @@ impl DecodeResult {
     }
 
     #[getter]
+    pub fn lsd(&self) -> Option<PyLsdResult> {
+        self.inner.lsd.clone().map(|lsd| PyLsdResult { inner: lsd })
+    }
+
+
+    #[getter]
     pub fn decoded_detectors<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<Bit>> {
         PyArray1::from_array(py, &self.inner.decoded_detectors)
     }
@@ -124,6 +164,11 @@ impl DecodeResult {
     }
 
     #[getter]
+    pub fn run_time_micros(&self) -> Option<u64> {
+        self.inner.run_time_micros
+    }
+
+    #[getter]
     pub fn bad_syndrome_neighbour_indices<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<usize>>> {
         self.inner.bad_syndrome_neighbour_indices.as_ref().map(|v| PyArray1::from_slice(py, v))
     }
@@ -134,6 +179,7 @@ impl DecodeResult {
 pub fn _decoder<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<DecodeResult>()?;
     m.add_class::<DynDecoder>()?;
+    m.add_class::<PyLsdResult>()?;
     Ok(())
 }
 

@@ -163,6 +163,11 @@ impl Decoder for EnsembleDecoder{
             .map(|decoder| decoder.decode_detailed(detectors.view()))
             .collect();
 
+        // Calculate max runtime among children
+        let max_runtime_micros = results.iter()
+            .filter_map(|r| r.run_time_micros)
+            .max();
+
         let first_result = results.first()
             .cloned()
             .expect("EnsembleDecoder requires at least one decoder.");
@@ -272,6 +277,7 @@ impl Decoder for EnsembleDecoder{
         if converged_results.is_empty()  {
             let mut res = first_result;
             res.logical_gap = None;
+            res.run_time_micros = max_runtime_micros;
 
             // Overwrite final iterations to the max of children; effective as +inf if any failed.
             res.iterations = max_child_iters;
@@ -424,6 +430,7 @@ impl Decoder for EnsembleDecoder{
                     residual_result: None,  // At least one decoder converged
                 });
 
+                best_result.run_time_micros = max_runtime_micros;
                 best_result
             }
             
@@ -471,6 +478,7 @@ impl Decoder for EnsembleDecoder{
                     residual_result: None,  // At least one decoder converged
                 });
 
+                final_result.run_time_micros = max_runtime_micros;
                 final_result
             }
         }
