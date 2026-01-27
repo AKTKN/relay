@@ -43,6 +43,11 @@ This document describes the information available after decoding with the Ensemb
 
       * Logical error gap calculated by the Observable decoder (may be `None`).
 
+9.  **`reliability`** - Option\<f64\>
+
+      * Ensemble reliability score computed from per-decoder iterations and coset vote gap.
+      * Returned by the Harmonized-BP wrapper when detailed stats are enabled.
+
 -----
 
 ## Ensemble Decoder Specific Information (`extra` field)

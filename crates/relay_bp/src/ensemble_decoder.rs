@@ -65,6 +65,7 @@ pub struct EnsembleDecoder{
     strategy: SelectionStrategy,
     original_log_priors: Option<Arc<Array1<f64>>>,
     observable_matrix: Option<Arc<SparseBitMatrix>>,
+    selection_max_index: Option<usize>,
     mode: EnsembleMode,
     repulsive_config: Option<Arc<RepulsiveConfig>>,
 }
@@ -77,6 +78,7 @@ impl EnsembleDecoder{
         strategy: SelectionStrategy,
         original_log_priors: Option<Arc<Array1<f64>>>,
         observable_matrix: Option<Arc<SparseBitMatrix>>,
+        selection_max_index: Option<usize>,
     ) -> Self{
         if decoders.is_empty(){
             panic!("EnsembleDecoder requires at least one decoder.");
@@ -94,6 +96,7 @@ impl EnsembleDecoder{
             strategy,
             original_log_priors,
             observable_matrix,
+            selection_max_index,
             mode: EnsembleMode::Normal,
             repulsive_config: None,
         } 
@@ -105,6 +108,7 @@ impl EnsembleDecoder{
         strategy: SelectionStrategy,
         original_log_priors: Option<Arc<Array1<f64>>>,
         observable_matrix: Option<Arc<SparseBitMatrix>>,
+        selection_max_index: Option<usize>,
         mode: EnsembleMode,
         repulsive_config: Option<Arc<RepulsiveConfig>>,
     ) -> Self{
@@ -133,6 +137,7 @@ impl EnsembleDecoder{
             strategy,
             original_log_priors,
             observable_matrix,
+            selection_max_index,
             mode,
             repulsive_config,
         } 
@@ -314,6 +319,30 @@ impl Decoder for EnsembleDecoder{
             return res;
         }
 
+        // Selection range for final decision (metrics still use all results)
+        let total_results = results.len();
+        let selection_max = self.selection_max_index.map(|m| m.min(total_results.saturating_sub(1)));
+        let selection_indices: Vec<usize> = match selection_max {
+            Some(m) => (0..=m).collect(),
+            None => (0..total_results).collect(),
+        };
+        let selection_converged_indices: Vec<usize> = selection_indices
+            .iter()
+            .copied()
+            .filter(|&i| results[i].success)
+            .collect();
+        let all_converged_indices: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.success)
+            .map(|(i, _)| i)
+            .collect();
+        let selection_indices_for_choice = if selection_converged_indices.is_empty() {
+            all_converged_indices.clone()
+        } else {
+            selection_converged_indices
+        };
+
         // Pre-computation for soft-information
         use std::collections::HashMap;
         // We already have obs_matrix_opt and log_priors_opt, but let's unwrap them as they are required for converged results
@@ -321,22 +350,34 @@ impl Decoder for EnsembleDecoder{
         let _log_priors = log_priors_opt.expect("original_log_priors is required for decoding.");
 
         // This HashMap will store (index, DecodeResult, llrCost, iter) tuples, keyed by logical_error
-        let mut coset_groups: HashMap<Array1<Bit>, Vec<(usize, DecodeResult, f64, usize)>> = HashMap::new();
+        let mut coset_groups_all: HashMap<Array1<Bit>, Vec<(usize, DecodeResult, f64, usize)>> = HashMap::new();
+        let mut coset_groups_sel: HashMap<Array1<Bit>, Vec<(usize, DecodeResult, f64, usize)>> = HashMap::new();
 
-        // Calculate LLR costs and group results by coset
-        for (i, result) in results.iter().enumerate() {
+        // Calculate LLR costs and group results by coset (all converged)
+        for &i in &all_converged_indices {
+            let result = &results[i];
+            let logical_error = cosets[i].clone();
+            let llr_cost = llr_sums[i];
+            let iter = result.iterations;
+            coset_groups_all.entry(logical_error).or_default().push((i, result.clone(), llr_cost, iter));
+        }
+
+        // Calculate LLR costs and group results by coset (selection range only)
+        for &i in &selection_indices_for_choice {
+            let result = &results[i];
             if result.success {
                 let logical_error = cosets[i].clone();
                 let llr_cost = llr_sums[i];
                 let iter = result.iterations;
-                coset_groups.entry(logical_error).or_default().push((i, result.clone(), llr_cost, iter));
+                coset_groups_sel.entry(logical_error).or_default().push((i, result.clone(), llr_cost, iter));
             }
         }
 
         // Find the minimum LLR within each coset and calculate statistics
-        let mut coset_stats: HashMap<Array1<Bit>, (usize, DecodeResult, f64, f64, usize)> = HashMap::new();
+        let mut coset_stats_all: HashMap<Array1<Bit>, (usize, DecodeResult, f64, f64, usize)> = HashMap::new();
+        let mut coset_stats_sel: HashMap<Array1<Bit>, (usize, DecodeResult, f64, f64, usize)> = HashMap::new();
         
-        for (coset, results_in_coset) in coset_groups.iter() {
+        for (coset, results_in_coset) in coset_groups_all.iter() {
             let (best_idx, best_result, min_llr) = results_in_coset.iter()
                 .min_by(|(_, _, llr_a, _), (_, _, llr_b, _)| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, r, l, _)| (*i, r.clone(), *l))
@@ -349,7 +390,23 @@ impl Decoder for EnsembleDecoder{
             
             let vote_count = results_in_coset.len();
             
-            coset_stats.insert(coset.clone(), (best_idx, best_result, min_llr, avg_iter, vote_count));
+            coset_stats_all.insert(coset.clone(), (best_idx, best_result, min_llr, avg_iter, vote_count));
+        }
+
+        for (coset, results_in_coset) in coset_groups_sel.iter() {
+            let (best_idx, best_result, min_llr) = results_in_coset.iter()
+                .min_by(|(_, _, llr_a, _), (_, _, llr_b, _)| llr_a.partial_cmp(llr_b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, r, l, _)| (*i, r.clone(), *l))
+                .unwrap();
+            
+            // Calculate average iteration for this coset
+            let avg_iter = results_in_coset.iter()
+                .map(|(_, _, _, iter)| *iter as f64)
+                .sum::<f64>() / results_in_coset.len() as f64;
+            
+            let vote_count = results_in_coset.len();
+            
+            coset_stats_sel.insert(coset.clone(), (best_idx, best_result, min_llr, avg_iter, vote_count));
         }
 
         // 2. Select the final correction based on the chosen strategy
@@ -357,12 +414,11 @@ impl Decoder for EnsembleDecoder{
             SelectionStrategy::MostLikely => {
                 // Find the result with the overall minimum LLR cost among CONVERGED results
                 // We iterate directly over results to ensure index alignment and avoid grouping issues.
-                let (best_idx, mut best_result) = results.iter().enumerate()
-                    .filter(|(_, r)| r.success)
+                let (best_idx, mut best_result) = selection_indices_for_choice.iter()
+                    .map(|&i| (i, results[i].clone()))
                     .min_by(|(i, _), (j, _)| {
                         llr_sums[*i].partial_cmp(&llr_sums[*j]).unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .map(|(i, r)| (i, r.clone()))
                     .expect("No converged results to compare for MostLikely strategy.");
 
                 let llr_final = llr_sums[best_idx];
@@ -437,13 +493,18 @@ impl Decoder for EnsembleDecoder{
             // --- MajorityVote Strategy ---
             SelectionStrategy::MajorityVote => {
                 // Find the winning coset (the one with the most votes)
-                let (winning_coset, (selected_idx, mut final_result, llr_final, selected_avg_iter, selected_votes)) = coset_stats.iter()
+                let (winning_coset, (selected_idx, mut final_result, llr_final, _sel_avg_iter, _sel_votes)) = coset_stats_sel.iter()
                     .max_by_key(|(_, (_, _, _, _, votes))| *votes)
                     .map(|(c, (idx, r, l, avg_i, votes))| (c.clone(), (*idx, r.clone(), *l, *avg_i, *votes)))
                     .expect("No converged results to vote on for MajorityVote strategy.");
 
+                let (selected_avg_iter, selected_votes) = coset_stats_all
+                    .get(&winning_coset)
+                    .map(|(_, _, _, avg_i, votes)| (*avg_i, *votes))
+                    .unwrap_or((0.0, 0));
+
                 // Find the second most voted coset
-                let runner_up = coset_stats.iter()
+                let runner_up = coset_stats_all.iter()
                     .filter(|(coset, _)| *coset != &winning_coset)
                     .max_by_key(|(_, (_, _, _, _, votes))| *votes);
 
@@ -923,6 +984,7 @@ mod tests {
             SelectionStrategy::MostLikely,
             Some(original_log_priors),
             None,
+            None,
         );
 
         let _decode_result = ensemble_decoder.decode_detailed(
@@ -981,6 +1043,7 @@ mod tests {
             SelectionStrategy::MostLikely,
             Some(original_log_priors),
             Some(observable_matrix.clone()), // MajorityVoteにはobservable_matrixが必要
+            None,
         );
         // --- 2. ObservableDecoderRunnerでラップする ---
         // これが今回の核心部分です！

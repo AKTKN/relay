@@ -46,6 +46,10 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         get_detail: bool = False,
         save_detail_path: Optional[pathlib.Path] = None,
         local_ambiguity_threshold: float = 0.0,
+        reliability_p_norm: Optional[float] = None,
+        reliability_alpha: Optional[float] = None,
+        reliability_beta: Optional[float] = None,
+        reliability_default_gap: Optional[float] = None,
     ):
         self.observable_decoder = observable_decoder
         self.parallel = parallel
@@ -56,6 +60,11 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
         self.get_detail = get_detail
+
+        self.reliability_p_norm = 2.0 if reliability_p_norm is None else float(reliability_p_norm)
+        self.reliability_alpha = 1.0 if reliability_alpha is None else float(reliability_alpha)
+        self.reliability_beta = 1.0 if reliability_beta is None else float(reliability_beta)
+        self.reliability_default_gap = 10.0 if reliability_default_gap is None else float(reliability_default_gap)
         
         # 詳細情報を蓄積するためのバッファ
         self.accumulated_details = {
@@ -66,6 +75,58 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             'selected_coset_votes': [],
             'runner_up_coset_votes': [],
         }
+
+    def _compute_reliability(
+        self,
+        child_iterations: list,
+        logical_gap: Optional[float],
+    ) -> Optional[float]:
+        if child_iterations is None or len(child_iterations) == 0:
+            return None
+
+        p_norm = float(self.reliability_p_norm)
+        if not np.isfinite(p_norm) or p_norm <= 0:
+            return None
+
+        iters = np.asarray(child_iterations, dtype=float)
+        iters = np.clip(iters, 1e-12, None)
+        log_iters = np.log(iters)
+
+        scaled = p_norm * log_iters
+        max_scaled = np.max(scaled)
+        if not np.isfinite(max_scaled):
+            return None
+
+        log_mean = max_scaled + np.log(np.mean(np.exp(scaled - max_scaled)))
+        log_mp = log_mean / p_norm
+
+        if logical_gap is None:
+            delta = self.reliability_default_gap
+        else:
+            try:
+                delta = float(logical_gap)
+                if not np.isfinite(delta):
+                    delta = self.reliability_default_gap
+            except Exception:
+                delta = self.reliability_default_gap
+
+        alpha = max(float(self.reliability_alpha), 1e-12)
+        beta = max(float(self.reliability_beta), 0.0)
+
+        x = alpha * max(delta, 0.0)
+        if x < 1e-12:
+            log_gap = np.log(max(x, 1e-12))
+        else:
+            log_gap = np.log1p(-np.exp(-x))
+
+        log_r = log_gap - beta * log_mp
+        if not np.isfinite(log_r):
+            return None
+
+        r = float(np.exp(log_r))
+        if not np.isfinite(r):
+            return None
+        return float(np.clip(r, 0.0, 1.0))
 
     @property
     def observables_matrix(self):
@@ -123,6 +184,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         local_ambiguity_score = None
         bp_runtime_micros = None
         lsd_runtime_micros = None
+        reliability = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -147,6 +209,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             bp_runtime_list = []
             lsd_runtime_list = []
             decoding_list = []
+            reliability_list = []
 
             # Get error_priors (LLR) for computing correction weights
             # Calculate prior LLRs: ln((1-p)/p)
@@ -269,11 +332,21 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     # Debug
                     assert selected_idx == np.argmin(correction_wt) or True, "Selected index does not match minimum weight index."
 
+                    reliability_val = None
+                    child_iterations = extra.get('child_iterations')
+                    if child_iterations is not None:
+                        reliability_val = self._compute_reliability(
+                            child_iterations,
+                            res.logical_gap,
+                        )
+                    reliability_list.append(reliability_val)
+
                 else:
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
                     mean_iter_list.append(None)
                     std_iter_list.append(None)
+                    reliability_list.append(None)
 
             # NumPy配列に変換（Noneを含むためobject型）
             iter_deltas = np.array(iter_deltas_list, dtype=object)
@@ -288,6 +361,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             bp_runtime_micros = np.array(bp_runtime_list, dtype=object)
             lsd_runtime_micros = np.array(lsd_runtime_list, dtype=object)
             decoding = np.array(decoding_list, dtype=object)
+            reliability = np.array(reliability_list, dtype=object)
 
             if all(v is not None for v in decoding_list):
                 decoding = np.array(decoding_list, dtype=np.uint8)
@@ -337,6 +411,7 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             correction_hammingweight=correction_hammingweight,
             correction_weight=correction_weight,
             local_ambiguity_score=local_ambiguity_score,
+            reliability=reliability,
             lsd=lsd,
             bp_runtime_micros=bp_runtime_micros,
             lsd_runtime_micros=lsd_runtime_micros,
@@ -393,6 +468,10 @@ class SinterDecoder_BaseBP(Decoder):
             leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
             get_detail=self.get_detail_result,
             local_ambiguity_threshold=getattr(self, 'local_ambiguity_threshold', 0.0),
+            reliability_p_norm=getattr(self, 'reliability_p_norm', None),
+            reliability_alpha=getattr(self, 'reliability_alpha', None),
+            reliability_beta=getattr(self, 'reliability_beta', None),
+            reliability_default_gap=getattr(self, 'reliability_default_gap', None),
         )
 
 
@@ -484,8 +563,17 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         # --- New parameters for harmonization ---
         ensemble_size: int = 1,
         selection_strategy: str = "MostLikely",
+        selection_max_index: int | None = None,
         perturbation_min: float = 0.0,
         perturbation_max: float = 0.0,
+        perturbation_type: str = "linear",
+        b_min: float | None = None,
+        b_max: float | None = None,
+        prior_modify_method: str = "linear_sampling",
+        reliability_p_norm: float | None = None,
+        reliability_alpha: float | None = None,
+        reliability_beta: float | None = None,
+        reliability_default_gap: float | None = None,
         # --- For automorphism ---
         use_automorphism: bool = False,
         # --- For repulsive mode ---
@@ -520,8 +608,17 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.logging = logging
         self.ensemble_size = ensemble_size
         self.selection_strategy = selection_strategy
+        self.selection_max_index = selection_max_index
         self.perturbation_min = perturbation_min
         self.perturbation_max = perturbation_max
+        self.perturbation_type = perturbation_type
+        self.b_min = b_min
+        self.b_max = b_max
+        self.prior_modify_method = prior_modify_method
+        self.reliability_p_norm = reliability_p_norm
+        self.reliability_alpha = reliability_alpha
+        self.reliability_beta = reliability_beta
+        self.reliability_default_gap = reliability_default_gap
         self.local_ambiguity_threshold = local_ambiguity_threshold
         self.enable_lsd = enable_lsd
         self.lsd_order = lsd_order
@@ -599,8 +696,13 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             stopping_criterion=self.stopping_criterion,
             logging=self.logging,
             selection_strategy=self.selection_strategy,
+            selection_max_index=self.selection_max_index,
             perturbation_min=self.perturbation_min,
             perturbation_max=self.perturbation_max,
+            perturbation_type=self.perturbation_type,
+            b_min=self.b_min,
+            b_max=self.b_max,
+            prior_modify_method=self.prior_modify_method,
             col_permutations=self.col_permutations,
             row_permutations=self.row_permutations,
             seed=self.seed,
@@ -801,6 +903,7 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     
     relay_config.pop("ensemble_size", None)
     relay_config.pop("selection_strategy", None)
+    relay_config.pop("selection_max_index", None)
     relay_config.pop("perturbation_min", None)
     relay_config.pop("perturbation_max", None)
     relay_config.pop("use_automorphism", None)
@@ -810,6 +913,14 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("abs_llr_threshold", None)
     relay_config.pop("pulse_per_leg", None)
     relay_config.pop("start_leg", None)
+    relay_config.pop("perturbation_type", None)
+    relay_config.pop("b_min", None)
+    relay_config.pop("b_max", None)
+    relay_config.pop("prior_modify_method", None)
+    relay_config.pop("reliability_p_norm", None)
+    relay_config.pop("reliability_alpha", None)
+    relay_config.pop("reliability_beta", None)
+    relay_config.pop("reliability_default_gap", None)
     # relay_config.pop("seed", None)
 
     return {

@@ -25,6 +25,7 @@ class DecodeResult:
     correction_hammingweight: Optional[np.ndarray] = None  # Hamming weight of the estimated error (correction) per shot
     correction_weight: Optional[np.ndarray] = None  # Total LLR of the estimated error (correction) per shot
     local_ambiguity_score: Optional[np.ndarray] = None  # Sum of inverse posterior LLRs of variable nodes adjacent to non-trivial syndromes
+    reliability: Optional[np.ndarray] = None  # Ensemble reliability score per shot
     lsd: Optional[np.ndarray] = None # LSD result
     bp_runtime_micros: Optional[np.ndarray] = None
     lsd_runtime_micros: Optional[np.ndarray] = None

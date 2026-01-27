@@ -21,3 +21,4 @@ numpy = {workspace = true}
 pyo3 = {workspace = true, features = ["auto-initialize"]}
 sprs = {workspace = true}
 rand = "0.8.5"
+rand_distr = "0.4"

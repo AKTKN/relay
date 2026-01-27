@@ -28,6 +28,7 @@ use pyo3::{Bound, PyResult};
 use pyo3::types::{PyList, PyDict};
 use std::mem;
 use rand::Rng;
+use rand_distr::{Distribution, Normal};
 use sprs::CsMat;
 use rand::random;
 
@@ -228,8 +229,9 @@ impl ObservableDecoderRunner {
     #[staticmethod]
     #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
         set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
-        stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), 
-        perturbation_min=0.0, perturbation_max=0.0, col_permutations=None, row_permutations=None, seed=None,
+        stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), selection_max_index=None,
+        perturbation_min=0.0, perturbation_max=0.0, perturbation_type="linear".to_string(), b_min=None, b_max=None,
+        prior_modify_method="linear_sampling".to_string(), col_permutations=None, row_permutations=None, seed=None,
         ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None,
         enable_lsd=false, lsd_order=0, lsd_method=0))]
     #[allow(clippy::too_many_arguments)]
@@ -253,8 +255,13 @@ impl ObservableDecoderRunner {
         stopping_criterion: String,
         logging: bool,
         selection_strategy: String,
+        selection_max_index: Option<usize>,
         perturbation_min: f64,
         perturbation_max: f64,
+        perturbation_type: String,
+        b_min: Option<f64>,
+        b_max: Option<f64>,
+        prior_modify_method: String,
         col_permutations: Option<&Bound<'_, PyAny>>,
         row_permutations: Option<&Bound<'_, PyAny>>,
         seed: Option<u64>,
@@ -327,29 +334,103 @@ impl ObservableDecoderRunner {
         // Initnalize random number generator
         let mut rng = rand::thread_rng();
 
+        let perturbation_type = perturbation_type.to_lowercase();
+        let prior_modify_method = prior_modify_method.to_lowercase();
+
+        let mut intensity_min = perturbation_min;
+        let mut intensity_max = perturbation_max;
+        if intensity_min > intensity_max {
+            std::mem::swap(&mut intensity_min, &mut intensity_max);
+        }
+
+        let mut ratio_b_min = b_min.unwrap_or(perturbation_min);
+        let mut ratio_b_max = b_max.unwrap_or(perturbation_max);
+        if ratio_b_min > ratio_b_max {
+            std::mem::swap(&mut ratio_b_min, &mut ratio_b_max);
+        }
+
+        let compute_scaled_value = |i: usize, n: usize, min_val: f64, max_val: f64| -> f64 {
+            if n <= 1 {
+                return min_val;
+            }
+            let denom = (n - 1) as f64;
+            let frac = (i as f64) / denom;
+            match perturbation_type.as_str() {
+                "exponential" => {
+                    if min_val > 0.0 && max_val > 0.0 {
+                        let ln_min = min_val.ln();
+                        let ln_max = max_val.ln();
+                        (ln_min + frac * (ln_max - ln_min)).exp()
+                    } else {
+                        min_val + frac * (max_val - min_val)
+                    }
+                }
+                _ => min_val + frac * (max_val - min_val),
+            }
+        };
+
         // Create child decoders 
         for i in 0..ensemble_size {
             // Determine if this decoder should use repulsive mode
             let use_repulsive = i < repulsive_size;
-            // Generate a random perturbation strongness within the specified range
-            // let alpha_perturb = if perturbation_min < perturbation_max {
-            //     rng.gen_range(perturbation_min..perturbation_max)
-            // } else {
-            //     0.0
-            // };
 
-            
             // Apply the perturbation to the error priors
             // but include no-perturbation case for the first decoder (i == 0)
-            let perturbed_priors = if (perturbation_min < perturbation_max) && (i != 0){
-                let mut new_priors = error_priors_owned.clone();
-                for p in new_priors.iter_mut(){
-                    let factor = rng.gen_range((1.0 - perturbation_min)..=(1.0 + perturbation_max));
-                    *p = (*p * factor).clamp(1e-15, 1.0 - 1e-15);
+            let perturbed_priors = match prior_modify_method.as_str() {
+                "ratio" => {
+                    let mut new_priors = error_priors_owned.clone();
+                    let mut b_i = if i == 0 { 1.0 } else { compute_scaled_value(i, ensemble_size, ratio_b_min, ratio_b_max) };
+                    if !b_i.is_finite() || b_i <= 0.0 {
+                        b_i = 1.0;
+                    }
+                    if b_i != 1.0 {
+                        for p in new_priors.iter_mut() {
+                            *p = p.powf(b_i).clamp(1e-15, 1.0 - 1e-15);
+                        }
+                    }
+                    new_priors
                 }
-                new_priors
-            } else {
-                error_priors_owned.clone()
+                "log_normal" | "lognormal" | "gaussian_log" => {
+                    let mut max_factor = if i == 0 { 1.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
+                    if !max_factor.is_finite() || max_factor <= 1.0 {
+                        max_factor = 1.0;
+                    }
+                    if max_factor > 1.0 {
+                        let sigma = (max_factor.ln() / 1.96).max(1e-12);
+                        let normal = Normal::new(0.0, sigma).ok();
+                        if let Some(normal) = normal {
+                            let min_factor = (1.0 / max_factor).max(1e-12);
+                            let mut new_priors = error_priors_owned.clone();
+                            for p in new_priors.iter_mut() {
+                                let z = normal.sample(&mut rng);
+                                let mut factor = z.exp();
+                                factor = factor.clamp(min_factor, max_factor);
+                                *p = (*p * factor).clamp(1e-15, 1.0 - 1e-15);
+                            }
+                            new_priors
+                        } else {
+                            error_priors_owned.clone()
+                        }
+                    } else {
+                        error_priors_owned.clone()
+                    }
+                }
+                _ => {
+                    let mut intensity = if i == 0 { 0.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
+                    if !intensity.is_finite() || intensity <= 0.0 {
+                        intensity = 0.0;
+                    }
+                    if intensity > 0.0 {
+                        let mut new_priors = error_priors_owned.clone();
+                        for p in new_priors.iter_mut() {
+                            let factor = rng.gen_range((1.0 - intensity)..=(1.0 + intensity));
+                            *p = (*p * factor).clamp(1e-15, 1.0 - 1e-15);
+                        }
+                        new_priors
+                    } else {
+                        error_priors_owned.clone()
+                    }
+                }
             };
 
             // Apply permutations
@@ -453,6 +534,7 @@ impl ObservableDecoderRunner {
             strategy,
             Some(original_log_priors_arc),
             Some(obs_matrix_arc.clone()),
+            selection_max_index,
             mode,
             repulsive_config_arc,
         );
