@@ -20,6 +20,7 @@ use relay_bp::ensemble_decoder::{EnsembleDecoder, SelectionStrategy, EnsembleMod
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::relay::{RelayDecoder, RelayDecoderConfig, StoppingCriterion};
 use relay_bp::decoder::{Decoder, AutomorphismWrapperDecoder, SparseBitMatrix};
+use relay_bp::rejection_decoder::{RejectionConfig, RejectionDecoder, ReweightingMode, ReweightingSelection};
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use ndarray::Array1;
@@ -187,6 +188,16 @@ impl ObservableDecodeResult {
                     
                     Ok(dict.into())
                 }
+                relay_bp::decoder::BPExtraResult::Rejection(rejection_extra) => {
+                    let dict = PyDict::new(py);
+                    dict.set_item("r2_iter", rejection_extra.r2_iter)?;
+                    dict.set_item("r3_iter", rejection_extra.r3_iter)?;
+                    dict.set_item("r2_class", rejection_extra.r2_class)?;
+                    dict.set_item("r3_class", rejection_extra.r3_class)?;
+                    dict.set_item("reject", rejection_extra.reject)?;
+                    dict.set_item("rejection_gap", rejection_extra.rejection_gap)?;
+                    Ok(dict.into())
+                }
             }
         } else {
             Ok(py.None())
@@ -233,7 +244,8 @@ impl ObservableDecoderRunner {
         perturbation_min=0.0, perturbation_max=0.0, perturbation_type="linear".to_string(), b_min=None, b_max=None,
         prior_modify_method="linear_sampling".to_string(), col_permutations=None, row_permutations=None, seed=None,
         ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None,
-        enable_lsd=false, lsd_order=0, lsd_method=0))]
+        enable_lsd=false, lsd_order=0, lsd_method=0, rejection_mode=false, reweighting_mode="full".to_string(), reweighting_selection="random".to_string(),
+        reweighting_k=0.5, reweighting_b=2.0))]
     #[allow(clippy::too_many_arguments)]
     pub fn with_ensemble_decoder(
         py: Python<'_>,
@@ -274,8 +286,13 @@ impl ObservableDecoderRunner {
         enable_lsd: bool,
         lsd_order: usize,
         lsd_method: usize,
+        rejection_mode: bool,
+        reweighting_mode: String,
+        reweighting_selection: String,
+        reweighting_k: f64,
+        reweighting_b: f64,
     ) -> PyResult<Self> {
-        // 1. Setyp parameters for child decoders
+        // 1. Setup parameters for child decoders
         let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
         let error_priors_owned = error_priors.as_array().to_owned();
 
@@ -329,6 +346,68 @@ impl ObservableDecoderRunner {
             lsd_order,
             lsd_method: lsd_method_str.clone(),
         };   
+
+        if rejection_mode {
+            if ensemble_size != 1 {
+                eprintln!("Warning: rejection_mode does not support ensemble_size > 1. Forcing ensemble_size=1.");
+            }
+
+            let reweighting_mode_enum = match reweighting_mode.to_lowercase().as_str() {
+                "partial" => ReweightingMode::Partial,
+                _ => ReweightingMode::Full,
+            };
+            let reweighting_selection_enum = match reweighting_selection.to_lowercase().as_str() {
+                "prior" | "prior_reweighting" => ReweightingSelection::Prior,
+                _ => ReweightingSelection::Random,
+            };
+
+            let min_sum_config = MinSumDecoderConfig {
+                error_priors: error_priors_owned.clone(),
+                max_iter: pre_iter,
+                alpha,
+                alpha_iteration_scaling_factor,
+                gamma0,
+                data_scale_value,
+                max_data_value,
+                int_bits: None,
+                frac_bits: None,
+                enable_lsd,
+                lsd_order,
+                lsd_method: lsd_method_str.clone(),
+            };
+
+            let mut relay_config = relay_config_templete.clone();
+            relay_config.seed = seed;
+            relay_config.repulsive_gamma_dist = None;
+            relay_config.abs_llr_threshold = None;
+            relay_config.pulse_per_leg = None;
+            relay_config.start_leg = None;
+
+            let rejection_config = RejectionConfig {
+                mode: reweighting_mode_enum,
+                selection: reweighting_selection_enum,
+                k: reweighting_k,
+                b: reweighting_b,
+                seed,
+            };
+
+            let rejection_decoder = RejectionDecoder::new(
+                check_matrix_arc.clone(),
+                obs_matrix_arc.clone(),
+                Arc::new(min_sum_config),
+                Arc::new(relay_config),
+                rejection_config,
+            );
+
+            let inner: relay_bp::observable_decoder::ObservableDecoderRunner<'_> = unsafe {
+                mem::transmute(ObservableDecoderRunnerInner::new(
+                    Box::new(rejection_decoder),
+                    obs_matrix_arc,
+                    true,
+                ))
+            };
+            return Ok(Self { inner });
+        }
 
         // Perturb error priors 
         // Initnalize random number generator

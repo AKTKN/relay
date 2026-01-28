@@ -261,6 +261,7 @@ pub struct DecodeResult {
 pub enum BPExtraResult {
     None,
     Ensemble(EnsembleExtraResult),
+    Rejection(RejectionExtraResult),
 }
 
 /// Extra information specific to ensemble decoding
@@ -328,6 +329,17 @@ pub struct EnsembleExtraResult {
     /// None if at least one decoder converged
     #[serde(default)]
     pub residual_result: Option<Vec<Array1<Bit>>>,
+}
+
+/// Extra information specific to rejection-mode decoding
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RejectionExtraResult {
+    pub r2_iter: Option<f64>,
+    pub r3_iter: Option<f64>,
+    pub r2_class: Option<bool>,
+    pub r3_class: Option<bool>,
+    pub reject: Option<u8>,
+    pub rejection_gap: Option<f64>,
 }
 
 // Add this struct definition

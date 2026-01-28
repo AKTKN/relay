@@ -13,6 +13,7 @@ pub mod bp;
 pub mod decoder;
 pub mod dem;
 pub mod ensemble_decoder;
+pub mod rejection_decoder;
 pub mod observable_decoder;
 pub mod utilities;
 

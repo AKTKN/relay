@@ -29,6 +29,12 @@ class DecodeResult:
     lsd: Optional[np.ndarray] = None # LSD result
     bp_runtime_micros: Optional[np.ndarray] = None
     lsd_runtime_micros: Optional[np.ndarray] = None
+    r2_iter: Optional[np.ndarray] = None
+    r3_iter: Optional[np.ndarray] = None
+    r2_class: Optional[np.ndarray] = None
+    r3_class: Optional[np.ndarray] = None
+    reject: Optional[np.ndarray] = None
+    rejection_gap: Optional[np.ndarray] = None
 
     def has_detailed_stats(self) -> bool:
         return self.iterations is not None

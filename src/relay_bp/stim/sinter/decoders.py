@@ -185,6 +185,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         bp_runtime_micros = None
         lsd_runtime_micros = None
         reliability = None
+        r2_iter = None
+        r3_iter = None
+        r2_class = None
+        r3_class = None
+        reject = None
+        rejection_gap = None
 
         if self.get_detail:
             results = self.observable_decoder.decode_observables_detailed_batch(
@@ -210,6 +216,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             lsd_runtime_list = []
             decoding_list = []
             reliability_list = []
+            r2_iter_list = []
+            r3_iter_list = []
+            r2_class_list = []
+            r3_class_list = []
+            reject_list = []
+            rejection_gap_list = []
 
             # Get error_priors (LLR) for computing correction weights
             # Calculate prior LLRs: ln((1-p)/p)
@@ -309,28 +321,40 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     selected_idx = extra.get('selected_index')
                     all_corrections = extra.get('all_corrections')
                     llr_sums = extra.get('llr_sums')
-                    converged_count = np.sum(extra.get('child_success')) 
-                    converged_count_list.append(converged_count)
+                    correction_wt_value = None
+                    child_success = extra.get('child_success')
+                    if child_success is not None:
+                        converged_count = np.sum(child_success)
+                        converged_count_list.append(converged_count)
+                    else:
+                        converged_count_list.append(None)
                     
                     if all_corrections is not None and selected_idx is not None:
-                            correction = all_corrections[selected_idx]
-                            
-                            if correction is not None:
-                                # Calculate Hamming weight
-                                correction_hw = int(np.sum(correction))
-  
-                                if llr_sums is not None and len(llr_sums) > selected_idx:
-                                    correction_wt = float(llr_sums[selected_idx])
-                                else:
-                                    eps = 1e-18
-                                    llr = np.log((1.0 - error_priors) / (error_priors + eps))
-                                    correction_wt = float(np.sum(llr * correction))
+                        correction = all_corrections[selected_idx]
 
+                        if correction is not None:
+                            # Calculate Hamming weight
+                            correction_hw = int(np.sum(correction))
+
+                            if llr_sums is not None and len(llr_sums) > selected_idx:
+                                correction_wt = float(llr_sums[selected_idx])
+                            else:
+                                eps = 1e-18
+                                llr = np.log((1.0 - error_priors) / (error_priors + eps))
+                                correction_wt = float(np.sum(llr * correction))
                             correction_hammingweight_list.append(correction_hw)
                             correction_weight_list.append(correction_wt)
+                            correction_wt_value = correction_wt
+                        else:
+                            correction_hammingweight_list.append(None)
+                            correction_weight_list.append(None)
+                    else:
+                        correction_hammingweight_list.append(None)
+                        correction_weight_list.append(None)
 
                     # Debug
-                    assert selected_idx == np.argmin(correction_wt) or True, "Selected index does not match minimum weight index."
+                    if correction_wt_value is not None:
+                        assert selected_idx == np.argmin(correction_wt_value) or True, "Selected index does not match minimum weight index."
 
                     reliability_val = None
                     child_iterations = extra.get('child_iterations')
@@ -341,12 +365,28 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                         )
                     reliability_list.append(reliability_val)
 
+                    r2_iter_list.append(extra.get('r2_iter'))
+                    r3_iter_list.append(extra.get('r3_iter'))
+                    r2_class_list.append(extra.get('r2_class'))
+                    r3_class_list.append(extra.get('r3_class'))
+                    reject_list.append(extra.get('reject'))
+                    rejection_gap_list.append(extra.get('rejection_gap'))
+
                 else:
                     iter_deltas_list.append(None)
                     vote_deltas_list.append(None)
                     mean_iter_list.append(None)
                     std_iter_list.append(None)
                     reliability_list.append(None)
+                    converged_count_list.append(None)
+                    correction_hammingweight_list.append(None)
+                    correction_weight_list.append(None)
+                    r2_iter_list.append(None)
+                    r3_iter_list.append(None)
+                    r2_class_list.append(None)
+                    r3_class_list.append(None)
+                    reject_list.append(None)
+                    rejection_gap_list.append(None)
 
             # NumPy配列に変換（Noneを含むためobject型）
             iter_deltas = np.array(iter_deltas_list, dtype=object)
@@ -362,6 +402,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             lsd_runtime_micros = np.array(lsd_runtime_list, dtype=object)
             decoding = np.array(decoding_list, dtype=object)
             reliability = np.array(reliability_list, dtype=object)
+            r2_iter = np.array(r2_iter_list, dtype=object)
+            r3_iter = np.array(r3_iter_list, dtype=object)
+            r2_class = np.array(r2_class_list, dtype=object)
+            r3_class = np.array(r3_class_list, dtype=object)
+            reject = np.array(reject_list, dtype=object)
+            rejection_gap = np.array(rejection_gap_list, dtype=object)
 
             if all(v is not None for v in decoding_list):
                 decoding = np.array(decoding_list, dtype=np.uint8)
@@ -415,6 +461,12 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             lsd=lsd,
             bp_runtime_micros=bp_runtime_micros,
             lsd_runtime_micros=lsd_runtime_micros,
+            r2_iter=r2_iter,
+            r3_iter=r3_iter,
+            r2_class=r2_class,
+            r3_class=r3_class,
+            reject=reject,
+            rejection_gap=rejection_gap,
         )
 
     def __del__(self):
@@ -574,6 +626,11 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         reliability_alpha: float | None = None,
         reliability_beta: float | None = None,
         reliability_default_gap: float | None = None,
+        rejection_mode: bool = False,
+        reweighting_mode: str = "full",
+        reweighting_selection: str = "random",
+        reweighting_k: float = 0.5,
+        reweighting_b: float = 2.0,
         # --- For automorphism ---
         use_automorphism: bool = False,
         # --- For repulsive mode ---
@@ -619,6 +676,11 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.reliability_alpha = reliability_alpha
         self.reliability_beta = reliability_beta
         self.reliability_default_gap = reliability_default_gap
+        self.rejection_mode = rejection_mode
+        self.reweighting_mode = reweighting_mode
+        self.reweighting_selection = reweighting_selection
+        self.reweighting_k = reweighting_k
+        self.reweighting_b = reweighting_b
         self.local_ambiguity_threshold = local_ambiguity_threshold
         self.enable_lsd = enable_lsd
         self.lsd_order = lsd_order
@@ -647,7 +709,28 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
     def build_observable_decoder(
         self, check_matrices: CheckMatrices
     ) -> relay_bp.ObservableDecoderRunner:
-        
+        if self.rejection_mode:
+            if self.ensemble_size != 1:
+                print("Warning: rejection_mode does not support ensemble. Forcing ensemble_size=1.")
+                self.ensemble_size = 1
+
+            if self.use_automorphism:
+                print("Warning: rejection_mode does not support automorphism. Disabling automorphism.")
+                self.use_automorphism = False
+
+            if self.perturbation_min != 0.0 or self.perturbation_max != 0.0:
+                print("Warning: rejection_mode does not support perturbation. Disabling perturbation.")
+                self.perturbation_min = 0.0
+                self.perturbation_max = 0.0
+
+            if self.ensemble_mode.lower() != "normal" or self.repulsive_size != 0:
+                print("Warning: rejection_mode does not support repulsive mode. Disabling repulsive settings.")
+                self.ensemble_mode = "normal"
+                self.repulsive_size = 0
+                self.repulsive_gamma_dist = (0.0, 0.0)
+                self.abs_llr_threshold = None
+                self.pulse_per_leg = None
+                self.start_leg = None
             
         col_perms = None
         row_perms = None
@@ -715,6 +798,11 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             enable_lsd=self.enable_lsd,
             lsd_order=self.lsd_order,
             lsd_method=self.lsd_method,
+            rejection_mode=self.rejection_mode,
+            reweighting_mode=self.reweighting_mode,
+            reweighting_selection=self.reweighting_selection,
+            reweighting_k=self.reweighting_k,
+            reweighting_b=self.reweighting_b,
         )
         return observable_decoder
     
@@ -921,6 +1009,11 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("reliability_alpha", None)
     relay_config.pop("reliability_beta", None)
     relay_config.pop("reliability_default_gap", None)
+    relay_config.pop("rejection_mode", None)
+    relay_config.pop("reweighting_mode", None)
+    relay_config.pop("reweighting_selection", None)
+    relay_config.pop("reweighting_k", None)
+    relay_config.pop("reweighting_b", None)
     # relay_config.pop("seed", None)
 
     return {
