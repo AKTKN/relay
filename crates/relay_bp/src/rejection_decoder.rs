@@ -167,8 +167,8 @@ impl RejectionDecoder {
         }
     }
 
-    fn apply_reweighting(&mut self, decoding: &Array1<Bit>) -> Array1<f64> {
-        let mut priors = (*self.original_priors).clone();
+    fn apply_reweighting(&mut self, base_priors: &Array1<f64>, decoding: &Array1<Bit>) -> Array1<f64> {
+        let mut priors = base_priors.clone();
         let indices = self.select_reweight_indices(decoding);
 
         if indices.is_empty() {
@@ -199,6 +199,8 @@ impl Decoder for RejectionDecoder {
     }
 
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        let original_priors_arc = self.original_priors.clone();
+        
         let mut decoder_stage1 = self.build_decoder_with_priors((*self.original_priors).clone());
         let mut result = decoder_stage1.decode_detailed(detectors);
 
@@ -213,8 +215,8 @@ impl Decoder for RejectionDecoder {
         let mut reject = 0u8;
         let mut rejection_gap = f64::NAN;
 
-        let priors_stage2 = self.apply_reweighting(&c1);
-        let mut decoder_stage2 = self.build_decoder_with_priors(priors_stage2);
+        let priors_stage2 = self.apply_reweighting(&(*original_priors_arc), &c1);
+        let mut decoder_stage2 = self.build_decoder_with_priors(priors_stage2.clone());
         let result2 = decoder_stage2.decode_detailed(detectors);
         let c2 = result2.decoding.clone();
         let coset2 = self.observable_matrix.mul_mod2(&c2);
@@ -233,8 +235,8 @@ impl Decoder for RejectionDecoder {
             let weight2 = self.compute_weight(&c2);
             rejection_gap = weight2 - weight1;
         } else {
-            let priors_stage3 = self.apply_reweighting(&c2);
-            let mut decoder_stage3 = self.build_decoder_with_priors(priors_stage3);
+            let priors_stage3 = self.apply_reweighting(&priors_stage2, &c2);
+            let mut decoder_stage3 = self.build_decoder_with_priors(priors_stage3.clone());
             let result3 = decoder_stage3.decode_detailed(detectors);
             let c3 = result3.decoding.clone();
             let coset3 = self.observable_matrix.mul_mod2(&c3);
