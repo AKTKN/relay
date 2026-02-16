@@ -40,8 +40,12 @@ fn gross_code_benchmark(c: &mut Criterion) {
         set_max_iter: 150,
         stopping_criterion: StoppingCriterion::PreIter,
         logging: false,
+        directional_mode: false,
+        pinning_gamma: None,
+        observable_matrix: None,
         ..Default::default()
     };
+
 
     let check_matrix = Arc::new(code_144_12_12.detector_error_matrix);
     let bp_config = Arc::new(bp_config_144_12_12);

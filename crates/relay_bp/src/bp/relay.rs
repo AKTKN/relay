@@ -7,10 +7,9 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
-
 use super::min_sum::{MinSumBPDecoder, MinSumDecoderConfig};
-use crate::decoder::{Bit, SparseBitMatrix};
-use crate::decoder::{DecodeResult, Decoder, DecoderRunner};
+use crate::decoder::{Bit, SparseBitMatrix, Mod2Mul};
+use crate::decoder::{DecodeResult, Decoder, DecoderRunner, BPExtraResult, DirectionalExtraResult};
 use log::debug;
 
 use ndarray::{Array1, Array2, ArrayView1};
@@ -49,6 +48,9 @@ pub struct RelayDecoderConfig {
     pub stopping_criterion: StoppingCriterion,
     pub logging: bool,
     pub seed: u64,
+    pub directional_mode: bool,
+    pub pinning_gamma: Option<f64>,
+    pub observable_matrix: Option<Arc<SparseBitMatrix>>,
     // Repulsive mode parameters
     pub repulsive_gamma_dist: Option<(f64, f64)>,
     pub abs_llr_threshold: Option<f64>,
@@ -70,6 +72,9 @@ impl Default for RelayDecoderConfig {
             stopping_criterion: StoppingCriterion::default(),
             logging: false,
             seed: 0,
+            directional_mode: false,
+            pinning_gamma: None,
+            observable_matrix: None,
             repulsive_gamma_dist: None,
             abs_llr_threshold: None,
             pulse_per_leg: None,
@@ -255,6 +260,47 @@ where
         self.bp_decoder.set_memory_strengths_f64(gammas);
     }
 
+    fn init_next_set_with_gamma_override(
+        &mut self,
+        set_idx: usize,
+        override_indices: &[usize],
+        override_gamma: f64,
+    ) {
+        let mut gammas = Array1::zeros(self.check_matrix().cols());
+        if self.relay_config.explicit_gammas.is_some() {
+            let gammas_num_sets = self.relay_config.explicit_gammas.as_ref().unwrap().shape()[0];
+            for i in 0..gammas.len() {
+                gammas[i] = *self
+                    .relay_config
+                    .explicit_gammas
+                    .as_ref()
+                    .unwrap()
+                    .get((set_idx % gammas_num_sets, i))
+                    .unwrap();
+            }
+        } else {
+            let (low, high) = self.relay_config.gamma_dist_interval;
+            let is_fixed = (low - high).abs() < 1e-12;
+            for i in 0..gammas.len() {
+                gammas[i] = if is_fixed {
+                    low
+                } else {
+                    self.posterior_update_state
+                        .uniform
+                        .sample(&mut self.posterior_update_state.rng_std)
+                };
+            }
+        }
+
+        for &idx in override_indices {
+            if idx < gammas.len() {
+                gammas[idx] = override_gamma;
+            }
+        }
+
+        self.bp_decoder.set_memory_strengths_f64(gammas);
+    }
+
     /// Initialize next set with repulsive mode: assigns repulsive gammas to high-LLR positions
     fn init_repulsive_set(&mut self, set_idx: usize) {
         let mut gammas = Array1::zeros(self.check_matrix().cols());
@@ -361,7 +407,7 @@ where
 
     /// Decode with the inner decoder
     /// If is_repulsive_leg is true, apply repulsive gamma for the entire leg
-    fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize, is_repulsive_leg: bool) -> DecodeResult {
+    fn decode_inner(&mut self, detectors: ArrayView1<Bit>, max_iter: usize, _is_repulsive_leg: bool) -> DecodeResult {
 
         // if detectors.iter().all(|&d| d == 0){
         //     debug!("No detection events. Returning success immediately.");
@@ -371,7 +417,7 @@ where
         let mut success: bool = false;
         let mut decoded_detectors = Array1::default(detectors.dim());
 
-        for iter in 0..max_iter {
+        for _iter in 0..max_iter {
             self.bp_decoder.run_iteration(detectors);
             decoded_detectors = self.bp_decoder.compute_decoded_detectors();
             success = self
@@ -445,6 +491,191 @@ where
 
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
         let start_time = Instant::now();
+        if self.relay_config.directional_mode {
+            if self.relay_config.enable_lsd {
+                panic!("Directional mode does not support LSD.");
+            }
+            if self.relay_config.repulsive_gamma_dist.is_some()
+                || self.relay_config.abs_llr_threshold.is_some()
+                || self.relay_config.pulse_per_leg.is_some()
+                || self.relay_config.start_leg.is_some()
+            {
+                panic!("Directional mode does not support repulsive settings.");
+            }
+
+            let stop_after = match self.relay_config.stopping_criterion.clone() {
+                StoppingCriterion::NConv { stop_after } => stop_after,
+                _ => panic!("Directional mode requires stopping_criterion = NConv."),
+            };
+
+            if stop_after < 2 || stop_after > 5 {
+                panic!("Directional mode requires stop_nconv in [2, 5].");
+            }
+
+            let obs_matrix = self
+                .relay_config
+                .observable_matrix
+                .clone()
+                .expect("Directional mode requires observable_matrix.");
+
+            let mut solutions: Vec<(Array1<Bit>, f64)> = Vec::new();
+            let mut solution_deltas: Vec<f64> = Vec::new();
+            let mut total_iterations: usize = 0;
+            let mut last_solution_total_iters: usize = 0;
+            let mut first_solution_total_iters: Option<usize> = None;
+
+            let mut best_result: Option<DecodeResult> = None;
+            let mut best_weight: f64 = f64::MAX;
+
+            let mut pending_directional_override = false;
+            let mut override_indices: Vec<usize> = Vec::new();
+
+            self.num_executed_sets = 0;
+
+            // First Mem-BP
+            self.bp_decoder.initialize_decoder();
+            let result = self.decode_inner(detectors, self.relay_config.pre_iter, false);
+            self.num_executed_sets = 1;
+
+            total_iterations += result.iterations;
+
+            if result.success {
+                let weight = result.decoding_quality;
+                let logical_class = obs_matrix.mul_mod2(&result.decoding);
+                solutions.push((logical_class, weight));
+
+                if weight < best_weight {
+                    best_weight = weight;
+                    best_result = Some(result.clone());
+                }
+
+                if first_solution_total_iters.is_none() {
+                    first_solution_total_iters = Some(total_iterations);
+                }
+
+                let delta = total_iterations - last_solution_total_iters;
+                solution_deltas.push(delta as f64);
+                last_solution_total_iters = total_iterations;
+
+                override_indices = result
+                    .decoding
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &b)| if b == 1 { Some(i) } else { None })
+                    .collect();
+                pending_directional_override = true;
+            }
+
+            // Init and loop over all Relay sets
+            for set in 1..=self.relay_config.num_sets {
+                if solutions.len() >= stop_after {
+                    break;
+                }
+
+                if pending_directional_override {
+                    self.bp_decoder
+                        .force_positive_posterior_at(&override_indices);
+                    let gamma0 = self.bp_decoder.config.gamma0.unwrap_or(0.0);
+                    let pinning_gamma = self.relay_config.pinning_gamma.unwrap_or(gamma0);
+                    self.init_next_set_with_gamma_override(set, &override_indices, pinning_gamma);
+                    pending_directional_override = false;
+                } else {
+                    self.init_next_set(set);
+                }
+
+                self.bp_decoder.current_iteration = 0;
+                self.bp_decoder.initialize_check_to_variable();
+                self.bp_decoder.initialize_variable_to_check();
+                let temp_result = self.decode_inner(detectors, self.relay_config.set_max_iter, false);
+
+                self.num_executed_sets += 1;
+                total_iterations += temp_result.iterations;
+
+                if temp_result.success {
+                    let weight = temp_result.decoding_quality;
+                    let logical_class = obs_matrix.mul_mod2(&temp_result.decoding);
+                    solutions.push((logical_class, weight));
+
+                    if weight < best_weight {
+                        best_weight = weight;
+                        best_result = Some(temp_result.clone());
+                    }
+
+                    if first_solution_total_iters.is_none() {
+                        first_solution_total_iters = Some(total_iterations);
+                        override_indices = temp_result
+                            .decoding
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &b)| if b == 1 { Some(i) } else { None })
+                            .collect();
+                        pending_directional_override = true;
+                    }
+
+                    let delta = total_iterations - last_solution_total_iters;
+                    solution_deltas.push(delta as f64);
+                    last_solution_total_iters = total_iterations;
+                }
+            }
+
+            let duration = start_time.elapsed().as_micros() as u64;
+
+            let mut final_result = best_result.unwrap_or_else(|| result.clone());
+            final_result.success = first_solution_total_iters.is_some();
+            final_result.iterations = first_solution_total_iters.unwrap_or(total_iterations);
+            final_result.run_time_micros = Some(duration);
+            final_result.lsd = None;
+
+            if solutions.is_empty() {
+                final_result.logical_gap = None;
+            } else {
+                let mut best_class = solutions[0].0.clone();
+                let mut best_weight_local = solutions[0].1;
+                for (class, weight) in &solutions[1..] {
+                    if *weight < best_weight_local {
+                        best_weight_local = *weight;
+                        best_class = class.clone();
+                    }
+                }
+
+                let mut min_diff = f64::INFINITY;
+                for (class, weight) in &solutions {
+                    if *class != best_class {
+                        let diff = *weight - best_weight_local;
+                        if diff < min_diff {
+                            min_diff = diff;
+                        }
+                    }
+                }
+
+                let gap = if min_diff.is_finite() {
+                    min_diff
+                } else {
+                    f64::NAN
+                };
+
+                final_result.logical_gap = Some(gap);
+            }
+
+            let s2_iter = if solution_deltas.len() >= 2 {
+                solution_deltas[1]
+            } else {
+                f64::INFINITY
+            };
+            let s3_iter = if solution_deltas.len() >= 3 {
+                solution_deltas[2]
+            } else {
+                f64::INFINITY
+            };
+
+            final_result.extra = BPExtraResult::Directional(DirectionalExtraResult {
+                s2_iter: Some(s2_iter),
+                s3_iter: Some(s3_iter),
+            });
+
+            return final_result;
+        }
+
         // Initialization
         let mut num_conv = 0;
         let mut min_pm = f64::MAX;

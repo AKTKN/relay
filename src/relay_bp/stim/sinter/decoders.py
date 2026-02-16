@@ -187,6 +187,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         reliability = None
         r2_iter = None
         r3_iter = None
+        s2_iter = None
+        s3_iter = None
         r2_class = None
         r3_class = None
         reject = None
@@ -218,6 +220,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             reliability_list = []
             r2_iter_list = []
             r3_iter_list = []
+            s2_iter_list = []
+            s3_iter_list = []
             r2_class_list = []
             r3_class_list = []
             reject_list = []
@@ -367,6 +371,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
 
                     r2_iter_list.append(extra.get('r2_iter'))
                     r3_iter_list.append(extra.get('r3_iter'))
+                    s2_iter_list.append(extra.get('s2_iter'))
+                    s3_iter_list.append(extra.get('s3_iter'))
                     r2_class_list.append(extra.get('r2_class'))
                     r3_class_list.append(extra.get('r3_class'))
                     reject_list.append(extra.get('reject'))
@@ -383,6 +389,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
                     correction_weight_list.append(None)
                     r2_iter_list.append(None)
                     r3_iter_list.append(None)
+                    s2_iter_list.append(None)
+                    s3_iter_list.append(None)
                     r2_class_list.append(None)
                     r3_class_list.append(None)
                     reject_list.append(None)
@@ -404,6 +412,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             reliability = np.array(reliability_list, dtype=object)
             r2_iter = np.array(r2_iter_list, dtype=object)
             r3_iter = np.array(r3_iter_list, dtype=object)
+            s2_iter = np.array(s2_iter_list, dtype=object)
+            s3_iter = np.array(s3_iter_list, dtype=object)
             r2_class = np.array(r2_class_list, dtype=object)
             r3_class = np.array(r3_class_list, dtype=object)
             reject = np.array(reject_list, dtype=object)
@@ -463,6 +473,8 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
             lsd_runtime_micros=lsd_runtime_micros,
             r2_iter=r2_iter,
             r3_iter=r3_iter,
+            s2_iter=s2_iter,
+            s3_iter=s3_iter,
             r2_class=r2_class,
             r3_class=r3_class,
             reject=reject,
@@ -622,6 +634,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         b_min: float | None = None,
         b_max: float | None = None,
         prior_modify_method: str = "linear_sampling",
+        schedule_mode: str = "parallel",
+        check_group_size: int = 1,
         reliability_p_norm: float | None = None,
         reliability_alpha: float | None = None,
         reliability_beta: float | None = None,
@@ -640,6 +654,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         abs_llr_threshold: float = None,
         pulse_per_leg: int = None,
         start_leg: int = None,
+        directional_mode: bool = False,
+        pinning_gamma: float | None = None,
         local_ambiguity_threshold: float = 0.0,
         # --- LSD parameters ---
         enable_lsd: bool = False,
@@ -672,6 +688,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.b_min = b_min
         self.b_max = b_max
         self.prior_modify_method = prior_modify_method
+        self.schedule_mode = schedule_mode
+        self.check_group_size = check_group_size
         self.reliability_p_norm = reliability_p_norm
         self.reliability_alpha = reliability_alpha
         self.reliability_beta = reliability_beta
@@ -696,6 +714,13 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
         self.start_leg = start_leg
         self.seed = np.random.randint(0, 2**32 - 1) if seed is None else seed
         self.get_detail = get_detail
+        self.directional_mode = directional_mode
+        self.pinning_gamma = pinning_gamma
+
+        if self.schedule_mode not in {"parallel", "layered"}:
+            raise ValueError("schedule_mode must be 'parallel' or 'layered'.")
+        if self.check_group_size < 1:
+            raise ValueError("check_group_size must be >= 1.")
 
         # 親クラスの__init__を呼び出す
         super().__init__(
@@ -709,6 +734,52 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
     def build_observable_decoder(
         self, check_matrices: CheckMatrices
     ) -> relay_bp.ObservableDecoderRunner:
+        if self.directional_mode:
+            if self.stop_nconv < 2 or self.stop_nconv > 5:
+                raise ValueError("directional_mode requires stop_nconv in [2, 5].")
+            if self.stopping_criterion != "nconv":
+                raise ValueError("directional_mode requires stopping_criterion='nconv'.")
+            if self.ensemble_size != 1:
+                raise ValueError("directional_mode requires ensemble_size=1.")
+            if self.rejection_mode:
+                raise ValueError("directional_mode does not support rejection_mode.")
+            if self.enable_lsd:
+                raise ValueError("directional_mode does not support LSD.")
+            if self.use_automorphism:
+                raise ValueError("directional_mode does not support automorphism.")
+            if self.perturbation_min != 0.0 or self.perturbation_max != 0.0:
+                raise ValueError("directional_mode does not support perturbation.")
+            if self.ensemble_mode.lower() != "normal" or self.repulsive_size != 0:
+                raise ValueError("directional_mode does not support ensemble/repulsive modes.")
+
+            decoder = relay_bp.RelayDecoderF64(
+                check_matrices.check_matrix,
+                error_priors=check_matrices.error_priors,
+                alpha=None if self.alpha == 0.0 else self.alpha,
+                gamma0=self.gamma0,
+                pre_iter=self.pre_iter,
+                num_sets=self.num_sets,
+                set_max_iter=self.set_max_iter,
+                gamma_dist_interval=self.gamma_dist_interval,
+                explicit_gammas=self.explicit_gammas,
+                stop_nconv=self.stop_nconv,
+                stopping_criterion=self.stopping_criterion,
+                logging=self.logging,
+                seed=self.seed,
+                directional_mode=True,
+                pinning_gamma=self.pinning_gamma,
+                observable_matrix=check_matrices.observables_matrix,
+                enable_lsd=False,
+                lsd_order=0,
+                lsd_method=0,
+            )
+
+            return relay_bp.ObservableDecoderRunner(
+                decoder,
+                check_matrices.observables_matrix,
+                include_decode_result=True,
+            )
+
         if self.rejection_mode:
             if self.ensemble_size != 1:
                 print("Warning: rejection_mode does not support ensemble. Forcing ensemble_size=1.")
@@ -786,6 +857,8 @@ class SinterDecoder_HarmonizedBP(SinterDecoder_BaseBP):
             b_min=self.b_min,
             b_max=self.b_max,
             prior_modify_method=self.prior_modify_method,
+            schedule_mode=self.schedule_mode,
+            check_group_size=self.check_group_size,
             col_permutations=self.col_permutations,
             row_permutations=self.row_permutations,
             seed=self.seed,
@@ -1014,6 +1087,10 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config.pop("reweighting_selection", None)
     relay_config.pop("reweighting_k", None)
     relay_config.pop("reweighting_b", None)
+    relay_config.pop("directional_mode", None)
+    relay_config.pop("pinning_gamma", None)
+    relay_config.pop("schedule_mode", None)
+    relay_config.pop("check_group_size", None)
     # relay_config.pop("seed", None)
 
     return {

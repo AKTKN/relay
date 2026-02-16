@@ -17,7 +17,7 @@ use relay_bp::observable_decoder::{
     ObservableDecoderRunner as ObservableDecoderRunnerInner,
 };
 use relay_bp::ensemble_decoder::{EnsembleDecoder, SelectionStrategy, EnsembleMode, RepulsiveConfig};
-use relay_bp::bp::min_sum::MinSumDecoderConfig;
+use relay_bp::bp::min_sum::{MessageSchedule, MinSumDecoderConfig};
 use relay_bp::bp::relay::{RelayDecoder, RelayDecoderConfig, StoppingCriterion};
 use relay_bp::decoder::{Decoder, AutomorphismWrapperDecoder, SparseBitMatrix};
 use relay_bp::rejection_decoder::{RejectionConfig, RejectionDecoder, ReweightingMode, ReweightingSelection};
@@ -198,6 +198,12 @@ impl ObservableDecodeResult {
                     dict.set_item("rejection_gap", rejection_extra.rejection_gap)?;
                     Ok(dict.into())
                 }
+                relay_bp::decoder::BPExtraResult::Directional(directional_extra) => {
+                    let dict = PyDict::new(py);
+                    dict.set_item("s2_iter", directional_extra.s2_iter)?;
+                    dict.set_item("s3_iter", directional_extra.s3_iter)?;
+                    Ok(dict.into())
+                }
             }
         } else {
             Ok(py.None())
@@ -238,11 +244,12 @@ impl ObservableDecoderRunner {
 
     // Factory method to create an ObservableDecoderRunner with an EnsembleDecoder inside
     #[staticmethod]
-    #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
+    #[pyo3(signature = (ensemble_size, check_matrix, observable_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, schedule_mode="parallel".to_string(), check_group_size=1, pre_iter=80, num_sets=300,
         set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
         stopping_criterion="nconv".to_string(), logging=false, selection_strategy="MostLikely".to_string(), selection_max_index=None,
         perturbation_min=0.0, perturbation_max=0.0, perturbation_type="linear".to_string(), b_min=None, b_max=None,
         prior_modify_method="linear_sampling".to_string(), col_permutations=None, row_permutations=None, seed=None,
+        directional_mode=false, pinning_gamma=None,
         ensemble_mode="normal".to_string(), repulsive_size=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None,
         enable_lsd=false, lsd_order=0, lsd_method=0, rejection_mode=false, reweighting_mode="full".to_string(), reweighting_selection="random".to_string(),
         reweighting_k=0.5, reweighting_b=2.0))]
@@ -258,6 +265,8 @@ impl ObservableDecoderRunner {
         gamma0: Option<f64>,
         data_scale_value: Option<f64>,
         max_data_value: Option<f64>,
+        schedule_mode: String,
+        check_group_size: usize,
         pre_iter: usize,
         num_sets: usize,
         set_max_iter: usize,
@@ -277,6 +286,8 @@ impl ObservableDecoderRunner {
         col_permutations: Option<&Bound<'_, PyAny>>,
         row_permutations: Option<&Bound<'_, PyAny>>,
         seed: Option<u64>,
+        directional_mode: bool,
+        pinning_gamma: Option<f64>,
         ensemble_mode: String,
         repulsive_size: usize,
         repulsive_gamma_dist: Option<(f64, f64)>,
@@ -292,6 +303,12 @@ impl ObservableDecoderRunner {
         reweighting_k: f64,
         reweighting_b: f64,
     ) -> PyResult<Self> {
+        if directional_mode {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "directional_mode is not supported with ensemble decoding. Use a single RelayDecoder instead.",
+            ));
+        }
+
         // 1. Setup parameters for child decoders
         let mut child_decoders: Vec<Box<dyn Decoder + Send>> = Vec::new();
         let error_priors_owned = error_priors.as_array().to_owned();
@@ -325,6 +342,25 @@ impl ObservableDecoderRunner {
             _ => StoppingCriterion::default(),
         };
 
+        let schedule_mode_enum = MessageSchedule::from_str(&schedule_mode).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid schedule_mode '{schedule_mode}'. Use 'parallel' or 'layered'."
+            ))
+        })?;
+        if schedule_mode_enum == MessageSchedule::Layered {
+            if check_group_size == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "check_group_size must be >= 1 for layered schedule",
+                ));
+            }
+            let num_checks = check_matrix_arc.rows();
+            if check_group_size > num_checks {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "check_group_size ({check_group_size}) exceeds number of checks ({num_checks})",
+                )));
+            }
+        }
+
         let seed = seed.unwrap_or_else(rand::random::<u64>);
 
         let lsd_method_str = match lsd_method {
@@ -338,6 +374,9 @@ impl ObservableDecoderRunner {
             pre_iter, num_sets, set_max_iter, gamma_dist_interval,
             explicit_gammas: explicit_gammas.map(|arr| arr.as_array().to_owned()),
             stopping_criterion: stopping_criterion_template, logging, seed,
+            directional_mode,
+            pinning_gamma,
+            observable_matrix: None,
             repulsive_gamma_dist: None,  // Will be set per-decoder based on mode
             abs_llr_threshold: None,
             pulse_per_leg: None,
@@ -374,6 +413,8 @@ impl ObservableDecoderRunner {
                 enable_lsd,
                 lsd_order,
                 lsd_method: lsd_method_str.clone(),
+                schedule_mode: schedule_mode_enum.clone(),
+                check_group_size,
             };
 
             let mut relay_config = relay_config_templete.clone();
@@ -458,7 +499,7 @@ impl ObservableDecoderRunner {
             let perturbed_priors = match prior_modify_method.as_str() {
                 "ratio" => {
                     let mut new_priors = error_priors_owned.clone();
-                    let mut b_i = if i == 0 { 1.0 } else { compute_scaled_value(i, ensemble_size, ratio_b_min, ratio_b_max) };
+                    let mut b_i = if i == 0 && ensemble_size > 1 { 1.0 } else { compute_scaled_value(i, ensemble_size, ratio_b_min, ratio_b_max) };
                     if !b_i.is_finite() || b_i <= 0.0 {
                         b_i = 1.0;
                     }
@@ -470,7 +511,7 @@ impl ObservableDecoderRunner {
                     new_priors
                 }
                 "log_normal" | "lognormal" | "gaussian_log" => {
-                    let mut max_factor = if i == 0 { 1.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
+                    let mut max_factor = if i == 0 && ensemble_size > 1 { 1.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
                     if !max_factor.is_finite() || max_factor <= 1.0 {
                         max_factor = 1.0;
                     }
@@ -495,7 +536,7 @@ impl ObservableDecoderRunner {
                     }
                 }
                 _ => {
-                    let mut intensity = if i == 0 { 0.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
+                    let mut intensity = if i == 0 && ensemble_size > 1 { 0.0 } else { compute_scaled_value(i, ensemble_size, intensity_min, intensity_max) };
                     if !intensity.is_finite() || intensity <= 0.0 {
                         intensity = 0.0;
                     }
@@ -550,6 +591,8 @@ impl ObservableDecoderRunner {
                 enable_lsd,
                 lsd_order,
                 lsd_method: lsd_method_str.clone(),
+                schedule_mode: schedule_mode_enum.clone(),
+                check_group_size,
             };
 
             // Create RelayDecoderConfig

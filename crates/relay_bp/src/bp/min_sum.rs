@@ -11,7 +11,6 @@
 use crate::bipartite_graph::SparseBipartiteGraph;
 use crate::decoder::{BPExtraResult, DecodeResult, Decoder, DecoderRunner, LsdResult};
 use crate::decoder::{Bit, SparseBitMatrix};
-use itertools::izip;
 use log::debug;
 use ndarray::{Array1, ArrayView1};
 use num_traits::FromPrimitive;
@@ -21,6 +20,28 @@ use std::fmt::Debug;
 use std::time::Instant;
 use std::sync::Arc;
 use std::collections::HashSet;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MessageSchedule {
+    Parallel,
+    Layered,
+}
+
+impl Default for MessageSchedule {
+    fn default() -> Self {
+        MessageSchedule::Parallel
+    }
+}
+
+impl MessageSchedule {
+    pub fn from_str(mode: &str) -> Option<Self> {
+        match mode.to_lowercase().as_str() {
+            "parallel" => Some(MessageSchedule::Parallel),
+            "layered" => Some(MessageSchedule::Layered),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct MinSumDecoderConfig {
@@ -36,6 +57,8 @@ pub struct MinSumDecoderConfig {
     pub enable_lsd: bool,
     pub lsd_order: usize,
     pub lsd_method: String,
+    pub schedule_mode: MessageSchedule,
+    pub check_group_size: usize,
 }
 
 impl Default for MinSumDecoderConfig {
@@ -53,6 +76,8 @@ impl Default for MinSumDecoderConfig {
             enable_lsd: false,
             lsd_order: 0,
             lsd_method: "LSD_0".to_string(),
+            schedule_mode: MessageSchedule::Parallel,
+            check_group_size: 1,
         }
     }
 }
@@ -210,6 +235,15 @@ where
         self.posterior_ratios = self.log_prior_ratios.clone();
     }
 
+    /// Force posterior ratios to be non-negative for selected variable indices.
+    pub fn force_positive_posterior_at(&mut self, indices: &[usize]) {
+        for &idx in indices {
+            if idx < self.posterior_ratios.len() {
+                self.posterior_ratios[idx] = self.posterior_ratios[idx].abs();
+            }
+        }
+    }
+
     /// Set external memory strengths from f64. Applies scaling if needed.
     pub fn set_memory_strengths_f64(&mut self, memory_strengths: Array1<f64>) {
         self.memory_strengths = match self.config.data_scale_value {
@@ -356,11 +390,24 @@ where
         &mut self,
         detectors: ArrayView1<Bit>,
     ) -> &mut SparseBipartiteGraph<N> {
-        let alpha = self.alpha();
+        let num_checks = self.check_matrix.rows();
+        self.compute_check_to_variable_range(detectors, 0, num_checks);
+        &mut self.check_to_variable
+    }
 
-        for (var_check_row_ind, var_check_row_vec) in
-            self.variable_to_check.outer_iterator().enumerate()
-        {
+    fn compute_check_to_variable_range(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        start_check: usize,
+        end_check: usize,
+    ) {
+        let alpha = self.alpha();
+        for var_check_row_ind in start_check..end_check {
+            let Some(var_check_row_vec) =
+                self.variable_to_check.outer_view(var_check_row_ind)
+            else {
+                continue;
+            };
             let row_sign = if detectors[var_check_row_ind] == 1 {
                 N::one().neg()
             } else {
@@ -413,39 +460,16 @@ where
                 if check_to_variable_sign {
                     check_to_variable = check_to_variable.neg();
                 }
+                if let Some(scale_val) = self.data_scale_value {
+                    check_to_variable /= scale_val;
+                }
 
                 // We directly manipulate the indicies of the check_to_variable_matrix using
                 // the cached value map to avoid the need for a logarithmic insert
                 self.check_to_variable.data_mut()[self.variable_to_check_nnz_map[ind]] =
                     check_to_variable;
             }
-
-            // NOTE: legacy path kept for quick rollback
-            // for (ind, var_check_col_ind, var_check_col_val) in izip!(
-            //     data_range.clone(),
-            //     &self.variable_to_check.indices()[data_range.clone()],
-            //     &self.variable_to_check.data()[data_range.clone()]
-            // ) {
-            //     let check_to_variable_sign = accumulated_sign ^ var_check_col_val.is_negative();
-            //     let check_to_variable_min: N = if *var_check_col_ind != min_ind {
-            //         min_message
-            //     } else {
-            //         second_min_message
-            //     };
-            //     let mut check_to_variable = alpha * check_to_variable_min;
-            //     if check_to_variable_sign {
-            //         check_to_variable = check_to_variable.neg();
-            //     }
-            //     self.check_to_variable.data_mut()[self.variable_to_check_nnz_map[ind]] =
-            //         check_to_variable;
-            // }
         }
-
-        if let Some(scale_val) = self.data_scale_value {
-            self.check_to_variable /= scale_val
-        }
-
-        &mut self.check_to_variable
     }
 
     fn compute_variable_prior(&self, variable: usize) -> N {
@@ -467,9 +491,22 @@ where
 
     /// Compute bit to check message iteration
     fn compute_variable_to_check(&mut self) -> &mut SparseBipartiteGraph<N> {
-        for (check_var_col_ind, check_var_col_vec) in
-            self.check_to_variable.outer_iterator().enumerate()
-        {
+        let num_vars = self.check_matrix.cols();
+        self.compute_variable_to_check_for_indices(0..num_vars);
+        self.bound_magnitudes();
+        &mut self.variable_to_check
+    }
+
+    fn compute_variable_to_check_for_indices<I>(&mut self, indices: I)
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        for check_var_col_ind in indices {
+            let Some(check_var_col_vec) =
+                self.check_to_variable.outer_view(check_var_col_ind)
+            else {
+                continue;
+            };
             // Accumulate messages
             let mut check_to_var_row_sum = self.compute_variable_prior(check_var_col_ind);
 
@@ -510,45 +547,52 @@ where
                     self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
                 );
             }
-
-            // NOTE: legacy path kept for quick rollback
-            // for (ind, check_var_row_val) in izip!(
-            //     data_range.clone(),
-            //     &self.check_to_variable.data()[data_range.clone()]
-            // ) {
-            //     self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
-            //         check_to_var_row_sum;
-            //     check_to_var_row_sum += *check_var_row_val;
-            // }
-            // check_to_var_row_sum = N::zero();
-            // for (ind, check_var_row_val) in izip!(
-            //     data_range.clone(),
-            //     &self.check_to_variable.data()[data_range.clone()]
-            // )
-            // .rev()
-            // {
-            //     let map_ind = self.check_to_variable_nnz_map[ind];
-            //     self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
-            //     check_to_var_row_sum += *check_var_row_val;
-            //     debug!(
-            //         "location ({:?}, {:?}), variable_to_check: {:.32}",
-            //         self.check_to_variable.indices()[ind],
-            //         check_var_col_ind,
-            //         self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
-            //     );
-            // }
         }
-
-        self.bound_magnitudes();
-
-        &mut self.variable_to_check
     }
 
     pub fn run_iteration(&mut self, detectors: ArrayView1<Bit>) {
         debug!("Iteration {:?} start", self.current_iteration);
-        self.compute_check_to_variable(detectors);
-        // Now compute variable to check messages
-        self.compute_variable_to_check();
+        match self.config.schedule_mode {
+            MessageSchedule::Parallel => {
+                self.compute_check_to_variable(detectors);
+                // Now compute variable to check messages
+                self.compute_variable_to_check();
+            }
+            MessageSchedule::Layered => {
+                let num_checks = self.check_matrix.rows();
+                let group_size = self.config.check_group_size;
+                if group_size == 0 {
+                    panic!("check_group_size must be >= 1 for layered schedule");
+                }
+                if group_size > num_checks {
+                    panic!(
+                        "check_group_size ({}) exceeds number of checks ({})",
+                        group_size, num_checks
+                    );
+                }
+                let mut affected_vars: Vec<usize> = Vec::new();
+                let mut affected_set: HashSet<usize> = HashSet::new();
+                let mut start = 0;
+                while start < num_checks {
+                    let end = (start + group_size).min(num_checks);
+                    self.compute_check_to_variable_range(detectors, start, end);
+                    affected_vars.clear();
+                    affected_set.clear();
+                    for check_idx in start..end {
+                        if let Some(row) = self.variable_to_check.outer_view(check_idx) {
+                            for &var_idx in row.indices() {
+                                if affected_set.insert(var_idx) {
+                                    affected_vars.push(var_idx);
+                                }
+                            }
+                        }
+                    }
+                    self.compute_variable_to_check_for_indices(affected_vars.iter().copied());
+                    start = end;
+                }
+                self.bound_magnitudes();
+            }
+        }
 
         self.compute_hard_decision();
         debug!("Iteration {:?} end", self.current_iteration);

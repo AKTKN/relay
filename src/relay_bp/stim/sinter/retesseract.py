@@ -238,6 +238,8 @@ class HarmonizedConfig:
     selection_strategy: str = "MostLikely"
     perturbation_range: Tuple[float, float] = (0.0, 0.0)
     use_automorphism: bool = False
+    schedule_mode: str = "parallel"
+    check_group_size: int = 1
 
     # Repulsive Mode
     ensemble_mode: str = "normal"

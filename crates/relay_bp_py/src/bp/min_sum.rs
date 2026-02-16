@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use relay_bp::bp::min_sum::{MinSumBPDecoder, MinSumDecoderConfig};
+use relay_bp::bp::min_sum::{MessageSchedule, MinSumBPDecoder, MinSumDecoderConfig};
 use relay_bp::decoder::Bit;
 
 macro_rules! create_bp_interface {
@@ -59,6 +59,8 @@ macro_rules! create_bp_interface {
                     enable_lsd,
                     lsd_order,
                     lsd_method,
+                    schedule_mode: MessageSchedule::Parallel,
+                    check_group_size: 1,
                 };
 
 

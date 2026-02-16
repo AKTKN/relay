@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use relay_bp::bp::min_sum::MinSumDecoderConfig;
+use relay_bp::bp::min_sum::{MessageSchedule, MinSumDecoderConfig};
 use relay_bp::bp::relay::{RelayDecoder, RelayDecoderConfig, StoppingCriterion};
 use relay_bp::decoder::Bit;
 
@@ -28,7 +28,8 @@ macro_rules! create_bp_interface {
             #[new]
             #[pyo3(signature = (check_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
                 set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
-                stopping_criterion="nconv".to_string(), logging=false, seed=0, repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None, enable_lsd=false, lsd_order=0, lsd_method="LSD_0".to_string()))]
+                stopping_criterion="nconv".to_string(), logging=false, seed=0, directional_mode=false, pinning_gamma=None, observable_matrix=None,
+                repulsive_gamma_dist=None, abs_llr_threshold=None, pulse_per_leg=None, start_leg=None, enable_lsd=false, lsd_order=0, lsd_method=0))]
             #[allow(clippy::missing_transmute_annotations, clippy::too_many_arguments)]
             pub fn new(
                 py: Python<'_>,
@@ -48,15 +49,25 @@ macro_rules! create_bp_interface {
                 stopping_criterion: String,
                 logging: bool,
                 seed: u64,
+                directional_mode: bool,
+                pinning_gamma: Option<f64>,
+                observable_matrix: Option<&Bound<'_, PyAny>>,
                 repulsive_gamma_dist: Option<(f64, f64)>,
                 abs_llr_threshold: Option<f64>,
                 pulse_per_leg: Option<usize>,
                 start_leg: Option<usize>,
                 enable_lsd: bool,
                 lsd_order: usize,
-                lsd_method: String,
+                lsd_method: usize,
             ) -> PyResult<(Self, DynDecoder)> {
                 let min_sum_decoder = Self {};
+
+                let lsd_method_str = match lsd_method {
+                    0 => "LSD_0".to_string(),
+                    1 => "LSD_E".to_string(),
+                    2 => "LSD_CS".to_string(),
+                    _ => "LSD_0".to_string(),
+                };
 
                 let min_sum_config = MinSumDecoderConfig {
                     error_priors: unsafe { error_priors.as_array() }.to_owned(),
@@ -70,7 +81,9 @@ macro_rules! create_bp_interface {
                     frac_bits: None,
                     enable_lsd,
                     lsd_order,
-                    lsd_method: lsd_method.clone(),
+                    lsd_method: lsd_method_str.clone(),
+                    schedule_mode: MessageSchedule::Parallel,
+                    check_group_size: 1,
                 };
 
                 let stopping_criterion = match stopping_criterion.as_str() {
@@ -80,6 +93,28 @@ macro_rules! create_bp_interface {
                     },
                     "all" => StoppingCriterion::All,
                     _ => StoppingCriterion::default(),
+                };
+
+                if directional_mode && observable_matrix.is_none() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "directional_mode requires observable_matrix.",
+                    ));
+                }
+                if directional_mode && enable_lsd {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "directional_mode does not support LSD.",
+                    ));
+                }
+                if directional_mode && repulsive_gamma_dist.is_some() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "directional_mode does not support repulsive settings.",
+                    ));
+                }
+
+                let observable_matrix_arc = if let Some(matrix) = observable_matrix {
+                    Some(Arc::new(get_sprs_bit_matrix_from_python(py, matrix)?))
+                } else {
+                    None
                 };
 
                 let relay_config = RelayDecoderConfig {
@@ -92,13 +127,16 @@ macro_rules! create_bp_interface {
                     stopping_criterion,
                     logging,
                     seed,
+                    directional_mode,
+                    pinning_gamma,
+                    observable_matrix: observable_matrix_arc,
                     repulsive_gamma_dist,
                     abs_llr_threshold,
                     pulse_per_leg,
                     start_leg,
                     enable_lsd,
                     lsd_order,
-                    lsd_method,
+                    lsd_method: lsd_method_str,
                 };
 
                 let inner_decoder = RelayDecoder::<$type>::new(

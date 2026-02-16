@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use relay_bp::bp::min_sum::MinSumDecoderConfig;
+use relay_bp::bp::min_sum::{MessageSchedule, MinSumDecoderConfig};
 use relay_bp::bp::min_sum_fixed::MinSumBPDecoderFixed as MinSumBPDecoderFixedInner;
 use relay_bp::decoder::Bit;
 
@@ -55,6 +55,8 @@ impl MinSumBPDecoderFixed {
             enable_lsd: false,
             lsd_order: 0,
             lsd_method: "basic_lsd".to_string(),
+            schedule_mode: MessageSchedule::Parallel,
+            check_group_size: 1,
         };
 
         let inner_decoder = MinSumBPDecoderFixedInner::new(

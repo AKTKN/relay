@@ -4,7 +4,6 @@ use crate::decoder::{BPExtraResult, EnsembleExtraResult};
 use ndarray::{Array1, ArrayView1}; use core::f64;
 // 1-dimentional ndarray crate for error and syndrome vecrtors
 use std::sync::Arc; // Smart pointer for shared owenership, this is useful for sharing data like chack matrices across multiple decoders.
-use ndarray::s;
 
 /// Ensemble decoder mode
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +59,7 @@ impl Default for SelectionStrategy{
 // - dyn Decoder: A trait object representig any type that implements the `Decoder` trait.
 // - + Send: A marker trait indicating that the type can be safely transfered across thread boundaries.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct EnsembleDecoder{
     decoders: Vec<Box<dyn Decoder + Send>>,
     strategy: SelectionStrategy,
@@ -934,7 +934,7 @@ mod tests {
     use crate::dem::DetectorErrorModel;
     use crate::observable_decoder::ObservableDecoderRunner;
     use crate::utilities::test::get_test_data_path;
-    use ndarray::{Array1, Array2};
+    use ndarray::{Array2, s};
     use ndarray_npy::read_npy;
     use std::sync::Arc;
 
@@ -1024,6 +1024,7 @@ mod tests {
                 seed: i,
                 ..Default::default()
             });
+
             
             let decoder = RelayDecoder::<f64>::new(
                 Arc::new(code_144_12_12.detector_error_matrix.clone()),
@@ -1059,7 +1060,7 @@ mod tests {
         // ObservableDecoderRunnerが提供するメソッドを使ってデコードします。
         // これにより、内部でensemble_decoder.decode()が呼ばれ、
         // その結果を使って論理エラーが計算されます。
-        let logical_errors = observable_ensemble_decoder.decode_observables_batch(detectors_144_12_12.slice(s![0..30, ..]));
+        let _logical_errors = observable_ensemble_decoder.decode_observables_batch(detectors_144_12_12.slice(s![0..30, ..]));
 
         println!("Ensemble Observable Decoding Test Passed!");
         println!("error prior: {:?}", code_144_12_12.error_priors);

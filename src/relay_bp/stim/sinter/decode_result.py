@@ -31,6 +31,8 @@ class DecodeResult:
     lsd_runtime_micros: Optional[np.ndarray] = None
     r2_iter: Optional[np.ndarray] = None
     r3_iter: Optional[np.ndarray] = None
+    s2_iter: Optional[np.ndarray] = None
+    s3_iter: Optional[np.ndarray] = None
     r2_class: Optional[np.ndarray] = None
     r3_class: Optional[np.ndarray] = None
     reject: Optional[np.ndarray] = None

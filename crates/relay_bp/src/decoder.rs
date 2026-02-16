@@ -262,6 +262,7 @@ pub enum BPExtraResult {
     None,
     Ensemble(EnsembleExtraResult),
     Rejection(RejectionExtraResult),
+    Directional(DirectionalExtraResult),
 }
 
 /// Extra information specific to ensemble decoding
@@ -340,6 +341,13 @@ pub struct RejectionExtraResult {
     pub r3_class: Option<bool>,
     pub reject: Option<u8>,
     pub rejection_gap: Option<f64>,
+}
+
+/// Extra information specific to directional-mode decoding
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DirectionalExtraResult {
+    pub s2_iter: Option<f64>,
+    pub s3_iter: Option<f64>,
 }
 
 // Add this struct definition
