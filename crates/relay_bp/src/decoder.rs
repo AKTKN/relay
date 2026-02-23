@@ -218,4 +218,11 @@ pub struct DecodeResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum BPExtraResult {
     None,
+    RelayTrace {
+        leg_success: Vec<bool>,
+        leg_iterations: Vec<usize>,
+        leg_negative_llr_counts: Vec<usize>,
+        leg_decodings: Vec<Array1<Bit>>,
+        leg_posteriors: Vec<Array1<f64>>,
+    },
 }

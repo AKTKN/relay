@@ -16,6 +16,10 @@ __all__ = [
     "RelayDecoderF64",
     "RelayDecoderI32",
     "RelayDecoderI64",
+    "LRBPDecoderF32",
+    "LRBPDecoderF64",
+    "LRBPDecoderI32",
+    "LRBPDecoderI64",
     "MinSumBPDecoderF32",
     "MinSumBPDecoderF64",
     "MinSumBPDecoderI8",
@@ -30,6 +34,10 @@ RelayDecoderF32 = _bp.RelayDecoderF32
 RelayDecoderF64 = _bp.RelayDecoderF64
 RelayDecoderI32 = _bp.RelayDecoderI32
 RelayDecoderI64 = _bp.RelayDecoderI64
+LRBPDecoderF32 = _bp.LRBPDecoderF32
+LRBPDecoderF64 = _bp.LRBPDecoderF64
+LRBPDecoderI32 = _bp.LRBPDecoderI32
+LRBPDecoderI64 = _bp.LRBPDecoderI64
 MinSumBPDecoderF32 = _bp.MinSumBPDecoderF32
 MinSumBPDecoderF64 = _bp.MinSumBPDecoderF64
 MinSumBPDecoderI8 = _bp.MinSumBPDecoderI8

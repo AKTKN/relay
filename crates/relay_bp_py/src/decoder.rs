@@ -13,6 +13,7 @@ use pyo3::types::PyAnyMethods;
 use pyo3::{Bound, PyResult};
 
 use numpy::{PyArray1, PyArray2, PyArrayMethods};
+use relay_bp::decoder::BPExtraResult;
 use relay_bp::bipartite_graph::BipartiteGraph;
 use relay_bp::decoder::{
     Bit, DecodeResult as DecodeResultInner, Decoder as DecoderInner, SparseBitMatrix,
@@ -120,6 +121,38 @@ impl DecodeResult {
     #[getter]
     pub fn max_iter(&self) -> usize {
         self.inner.max_iter
+    }
+
+    #[getter]
+    pub fn relay_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::RelayTrace {
+                leg_success,
+                leg_iterations,
+                leg_negative_llr_counts,
+                leg_decodings,
+                leg_posteriors,
+            } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("leg_success", leg_success.clone())?;
+                dict.set_item("leg_iterations", leg_iterations.clone())?;
+                dict.set_item("leg_negative_llr_counts", leg_negative_llr_counts.clone())?;
+
+                let py_decodings = pyo3::types::PyList::empty(py);
+                for arr in leg_decodings {
+                    py_decodings.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_decodings", py_decodings)?;
+
+                let py_posteriors = pyo3::types::PyList::empty(py);
+                for arr in leg_posteriors {
+                    py_posteriors.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_posteriors", py_posteriors)?;
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
     }
 }
 

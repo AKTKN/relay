@@ -156,6 +156,35 @@ def test_sinter_mem_bp_decoder_integration():
     assert samples[0].shots == 100
 
 
+def test_sinter_lrbp_decoder_integration():
+    def generate_example_tasks():
+        for p in [0.0001]:
+            for d in [3]:
+                yield sinter.Task(
+                    circuit=stim.Circuit.generated(
+                        rounds=d,
+                        distance=d,
+                        after_clifford_depolarization=p,
+                        code_task=f"surface_code:rotated_memory_x",
+                    ),
+                    json_metadata={
+                        "p": p,
+                        "d": d,
+                    },
+                )
+
+    samples = sinter.collect(
+        num_workers=2,
+        max_shots=1_00,
+        tasks=generate_example_tasks(),
+        decoders=["lr-bp"],
+        custom_decoders=sinter_decoders(),
+    )
+    assert samples[0].decoder == "lr-bp"
+    assert samples[0].errors <= 20
+    assert samples[0].shots == 100
+
+
 def test_sinter_decode_via_files():
     """Test decoding of the surface code via files."""
     circuit = stim.Circuit.generated(

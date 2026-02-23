@@ -9,7 +9,7 @@
 // that they have been altered from the originals.
 
 use super::min_sum::{MinSumBPDecoder, MinSumDecoderConfig};
-use crate::decoder::{Bit, SparseBitMatrix};
+use crate::decoder::{BPExtraResult, Bit, SparseBitMatrix};
 use crate::decoder::{DecodeResult, Decoder, DecoderRunner};
 use log::debug;
 
@@ -291,11 +291,21 @@ where
         let mut total_iterations: usize = 0;
         self.num_executed_sets = 0;
         let stopping_criterion = self.relay_config.stopping_criterion.clone();
+        let mut leg_success: Vec<bool> = Vec::with_capacity(self.relay_config.num_sets + 1);
+        let mut leg_iterations: Vec<usize> = Vec::with_capacity(self.relay_config.num_sets + 1);
+        let mut leg_negative_llr_counts: Vec<usize> = Vec::with_capacity(self.relay_config.num_sets + 1);
+        let mut leg_decodings: Vec<Array1<Bit>> = Vec::with_capacity(self.relay_config.num_sets + 1);
+        let mut leg_posteriors: Vec<Array1<f64>> = Vec::with_capacity(self.relay_config.num_sets + 1);
 
         // First Mem-BP
         self.bp_decoder.initialize_decoder();
         let mut result = self.decode_inner(detectors, self.relay_config.pre_iter);
         self.num_executed_sets = 1;
+        leg_success.push(result.success);
+        leg_iterations.push(result.iterations);
+        leg_negative_llr_counts.push(result.posterior_ratios.iter().filter(|x| **x < 0.0).count());
+        leg_decodings.push(result.decoding.clone());
+        leg_posteriors.push(result.posterior_ratios.clone());
 
         // Create logging variables and log first set if applicable
         if self.relay_config.logging {
@@ -330,6 +340,13 @@ where
                         .unwrap();
                     self.write_log(file);
                 }
+                result.extra = BPExtraResult::RelayTrace {
+                    leg_success,
+                    leg_iterations,
+                    leg_negative_llr_counts,
+                    leg_decodings,
+                    leg_posteriors,
+                };
                 return result;
             }
         }
@@ -344,6 +361,17 @@ where
             self.bp_decoder.initialize_check_to_variable();
             self.bp_decoder.initialize_variable_to_check();
             let temp_result = self.decode_inner(detectors, self.relay_config.set_max_iter);
+            leg_success.push(temp_result.success);
+            leg_iterations.push(temp_result.iterations);
+            leg_negative_llr_counts.push(
+                temp_result
+                    .posterior_ratios
+                    .iter()
+                    .filter(|x| **x < 0.0)
+                    .count(),
+            );
+            leg_decodings.push(temp_result.decoding.clone());
+            leg_posteriors.push(temp_result.posterior_ratios.clone());
 
             self.num_executed_sets += 1;
             total_iterations += temp_result.iterations;
@@ -386,6 +414,14 @@ where
                 .unwrap();
             self.write_log(file);
         }
+
+        result.extra = BPExtraResult::RelayTrace {
+            leg_success,
+            leg_iterations,
+            leg_negative_llr_counts,
+            leg_decodings,
+            leg_posteriors,
+        };
 
         result
     }

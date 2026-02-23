@@ -486,6 +486,31 @@ where
         debug!("Iteration {:?} end", self.current_iteration);
     }
 
+    pub fn run_check_to_variable_update(&mut self, detectors: ArrayView1<Bit>) {
+        self.compute_check_to_variable(detectors);
+    }
+
+    pub fn run_variable_to_check_update(&mut self) {
+        self.compute_variable_to_check();
+        self.compute_hard_decision();
+    }
+
+    pub fn check_to_variable_data(&self) -> &[N] {
+        self.check_to_variable.data()
+    }
+
+    pub fn check_to_variable_data_mut(&mut self) -> &mut [N] {
+        self.check_to_variable.data_mut()
+    }
+
+    pub fn check_to_variable_indices(&self) -> &[usize] {
+        self.check_to_variable.indices()
+    }
+
+    pub fn current_decoding(&self) -> &Array1<Bit> {
+        &self.decoding
+    }
+
     pub fn build_result(
         &mut self,
         success: bool,

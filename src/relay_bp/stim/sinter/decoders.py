@@ -260,6 +260,82 @@ class SinterDecoder_MemBP(SinterDecoder_BaseBP):
         return observable_decoder
 
 
+class SinterDecoder_LRBP(SinterDecoder_BaseBP):
+    def __init__(
+        self,
+        alpha: float | None = None,
+        gamma0: float = 0.1,
+        pre_iter: int = 60,
+        num_sets: int = 60,
+        set_max_iter: int = 60,
+        gamma_dist_interval: tuple[float, float] = (-0.24, 0.66),
+        explicit_gammas: np.ndarray | None = None,
+        stop_nconv: int = 5,
+        stopping_criterion: str = "nconv",
+        logging=False,
+        seed: int = 0,
+        osc_window: int = 5,
+        friction_slope: float = 2.0,
+        friction_shift: float = 0.0,
+        tau: float = 0.2,
+        parallel: bool = False,
+        decomposed_hyperedges: bool | None = None,
+        prune_decided_errors: bool = True,
+        threshold: float = 0.0,
+    ):
+        self.alpha = alpha
+        self.gamma0 = gamma0
+        self.pre_iter = pre_iter
+        self.num_sets = num_sets
+        self.set_max_iter = set_max_iter
+        self.gamma_dist_interval = tuple(gamma_dist_interval)
+        self.explicit_gammas = explicit_gammas
+        self.stop_nconv = stop_nconv
+        self.stopping_criterion = stopping_criterion
+        self.logging = logging
+        self.seed = seed
+        self.osc_window = osc_window
+        self.friction_slope = friction_slope
+        self.friction_shift = friction_shift
+        self.tau = tau
+        super().__init__(
+            parallel=parallel,
+            decomposed_hyperedges=decomposed_hyperedges,
+            prune_decided_errors=prune_decided_errors,
+            threshold=threshold,
+        )
+
+    def build_observable_decoder(
+        self, check_matrices: CheckMatrices
+    ) -> relay_bp.ObservableDecoderRunner:
+        decoder = relay_bp.LRBPDecoderF64(
+            check_matrices.check_matrix,
+            error_priors=check_matrices.error_priors,
+            alpha=None if self.alpha == 0.0 else self.alpha,
+            gamma0=self.gamma0,
+            pre_iter=self.pre_iter,
+            num_sets=self.num_sets,
+            set_max_iter=self.set_max_iter,
+            gamma_dist_interval=self.gamma_dist_interval,
+            explicit_gammas=self.explicit_gammas,
+            stop_nconv=self.stop_nconv,
+            stopping_criterion=self.stopping_criterion,
+            logging=self.logging,
+            seed=self.seed,
+            osc_window=self.osc_window,
+            friction_slope=self.friction_slope,
+            friction_shift=self.friction_shift,
+            tau=self.tau,
+        )
+
+        observable_decoder = relay_bp.ObservableDecoderRunner(
+            decoder,
+            check_matrices.observables_matrix,
+            include_decode_result=False,
+        )
+        return observable_decoder
+
+
 class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
 
     def __init__(
@@ -303,11 +379,19 @@ class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
 
 
 def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
+    relay_config = decoder_kwargs.copy()
+    lrbp_config = decoder_kwargs.copy()
+
+    lrbp_only_keys = ["osc_window", "friction_slope", "friction_shift", "tau", "seed"]
+    for key in lrbp_only_keys:
+        relay_config.pop(key, None)
+
     msl_config = {}
 
     if max_iter := decoder_kwargs.get("max_iter"):
         msl_config["max_iter"] = max_iter
-        decoder_kwargs.pop("max_iter", None)
+        relay_config.pop("max_iter", None)
+        lrbp_config.pop("max_iter", None)
 
     if alpha := decoder_kwargs.get("alpha"):
         msl_config["alpha"] = alpha
@@ -318,7 +402,8 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
         membp_config["gamma0"] = gamma0
 
     return {
-        "relay-bp": SinterDecoder_RelayBP(**decoder_kwargs),  # type: ignore
+        "relay-bp": SinterDecoder_RelayBP(**relay_config),  # type: ignore
+        "lr-bp": SinterDecoder_LRBP(**lrbp_config),  # type: ignore
         "mem-bp": SinterDecoder_MemBP(**membp_config),  # type: ignore
         "msl-bp": SinterDecoder_MSLBP(**msl_config),  # type: ignore
     }
