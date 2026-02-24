@@ -194,10 +194,6 @@ where
                 p_kick = 0.0;
             }
             p_kick = p_kick.clamp(0.0, 1.0);
-            if parity_violations[check_idx] == 0 {
-                p_kick = 0.0;
-            }
-            p_kick = p_kick.clamp(0.0, 1.0);
 
             let do_kick = self.state.rng_std.gen_bool(p_kick);
             let damped = friction.clamp(0.0, 1.0) * raw;
@@ -215,6 +211,113 @@ where
         }
     }
 
+    fn apply_langevin_modifier_with_dropout(
+        &mut self,
+        history: &mut [VecDeque<f64>],
+        parity_violations: &[u8],
+        current_iter: usize,
+        previous_messages: &[N],
+    ) {
+        let indices = self.bp_decoder.check_to_variable_indices().to_vec();
+        let raw_messages: Vec<f64> = self
+            .bp_decoder
+            .check_to_variable_data()
+            .iter()
+            .map(|x| x.to_f64().unwrap_or(0.0))
+            .collect();
+
+        let num_checks = self.bp_decoder.check_matrix().rows();
+        let mut check_dropout_decisions: Vec<Option<bool>> = vec![None; num_checks];
+        let mut modified_messages: Vec<N> = vec![N::zero(); raw_messages.len()];
+
+        let window_size = self.lrbp_config.osc_window.max(1);
+        let beta = self.lrbp_config.friction_slope;
+        let delta = self.lrbp_config.friction_shift;
+        let tau = self.lrbp_config.tau.max(1e-12);
+
+        for edge_idx in 0..raw_messages.len() {
+            let raw = raw_messages[edge_idx];
+            let check_idx = indices[edge_idx];
+
+            let edge_history = &mut history[edge_idx];
+            edge_history.push_back(raw);
+            while edge_history.len() > window_size {
+                edge_history.pop_front();
+            }
+
+            let oscillation = edge_history.iter().sum::<f64>().abs();
+            let friction = 1.0 / (1.0 + (-beta * (oscillation - delta)).exp());
+
+            let t_eff = tau / ((current_iter + 1) as f64).max(1.0);
+            let mut p_kick = (-oscillation / t_eff).exp();
+            if parity_violations[check_idx] == 0 {
+                p_kick = 0.0;
+            }
+            p_kick = p_kick.clamp(0.0, 1.0);
+
+            // One Bernoulli decision per check node: if true, reuse t-1 messages.
+            let drop_this_check = match check_dropout_decisions[check_idx] {
+                Some(decision) => decision,
+                None => {
+                    let decision = self.state.rng_std.gen_bool(p_kick);
+                    check_dropout_decisions[check_idx] = Some(decision);
+                    decision
+                }
+            };
+
+            if drop_this_check {
+                modified_messages[edge_idx] = previous_messages[edge_idx];
+                continue;
+            }
+
+            let do_kick = self.state.rng_std.gen_bool(p_kick);
+            let damped = friction.clamp(0.0, 1.0) * raw;
+            let message = if do_kick { -damped } else { damped };
+            modified_messages[edge_idx] = N::from_f64(message).unwrap_or_else(N::zero);
+        }
+
+        for (target, message) in self
+            .bp_decoder
+            .check_to_variable_data_mut()
+            .iter_mut()
+            .zip(modified_messages.iter())
+        {
+            *target = *message;
+        }
+    }
+
+    // Baseline Langevin leg update without dropout.
+    fn run_langevin_iteration(&mut self, detectors: ArrayView1<Bit>, history: &mut [VecDeque<f64>]) {
+        let parity_violations = self.parity_violations(detectors);
+        self.bp_decoder.run_check_to_variable_update(detectors);
+        self.apply_langevin_modifier(
+            history,
+            &parity_violations,
+            self.bp_decoder.current_iteration,
+        );
+        self.bp_decoder.run_variable_to_check_update();
+        // self.bp_decoder.run_lrbp_variable_to_check_update();
+    }
+
+    // Experimental Langevin leg update with check-node dropout.
+    fn run_langevin_iteration_with_dropout(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        history: &mut [VecDeque<f64>],
+    ) {
+        let parity_violations = self.parity_violations(detectors);
+        let previous_messages: Vec<N> = self.bp_decoder.check_to_variable_data().to_vec();
+        self.bp_decoder.run_check_to_variable_update(detectors);
+        self.apply_langevin_modifier_with_dropout(
+            history,
+            &parity_violations,
+            self.bp_decoder.current_iteration,
+            previous_messages.as_slice(),
+        );
+        self.bp_decoder.run_variable_to_check_update();
+        // self.bp_decoder.run_lrbp_variable_to_check_update();
+    }
+
     fn decode_inner(
         &mut self,
         detectors: ArrayView1<Bit>,
@@ -227,12 +330,19 @@ where
 
         for _ in 0..max_iter {
             if use_langevin {
-                let parity_violations = self.parity_violations(detectors);
-                self.bp_decoder.run_check_to_variable_update(detectors);
-                self.apply_langevin_modifier(history, &parity_violations, self.bp_decoder.current_iteration);
-                // Use LRBP-specific marginal blending after computing the plain BP marginal.
-                self.bp_decoder.run_variable_to_check_update();
+                // let parity_violations = self.parity_violations(detectors);
+                // self.bp_decoder.run_check_to_variable_update(detectors);
+                // self.apply_langevin_modifier(history, &parity_violations, self.bp_decoder.current_iteration);
+                // // Use LRBP-specific marginal blending after computing the plain BP marginal.
+                // self.bp_decoder.run_variable_to_check_update();
                 // self.bp_decoder.run_lrbp_variable_to_check_update();
+                // Toggle this flag to quickly switch between baseline and dropout updates.
+                let use_check_update_dropout = true;
+                if use_check_update_dropout {
+                    self.run_langevin_iteration_with_dropout(detectors, history);
+                } else {
+                    self.run_langevin_iteration(detectors, history);
+                }
             } else {
                 self.bp_decoder.run_iteration(detectors);
             }
