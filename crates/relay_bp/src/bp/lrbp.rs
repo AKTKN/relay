@@ -51,7 +51,8 @@ impl Default for LRBPDecoderConfig {
 #[derive(Clone)]
 struct LRBPState {
     rng_std: rand::rngs::StdRng,
-    uniform: rand::distributions::Uniform<f64>,
+    uniform: Option<rand::distributions::Uniform<f64>>,
+    fixed_gamma: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -102,8 +103,22 @@ where
         let rng_std: rand::prelude::StdRng = rand::rngs::StdRng::seed_from_u64(lrbp_config.seed);
         let low = lrbp_config.gamma_dist_interval.0;
         let high = lrbp_config.gamma_dist_interval.1;
-        let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
-        LRBPState { rng_std, uniform }
+
+        // If both endpoints are equal, treat gamma as a fixed value and skip random sampling.
+        if low == high {
+            LRBPState {
+                rng_std,
+                uniform: None,
+                fixed_gamma: Some(low),
+            }
+        } else {
+            let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
+            LRBPState {
+                rng_std,
+                uniform: Some(uniform),
+                fixed_gamma: None,
+            }
+        }
     }
 
     fn init_next_set(&mut self, set_idx: usize) {
@@ -122,8 +137,20 @@ where
             self.bp_decoder.set_memory_strengths_f64(gammas);
             return;
         }
+
+        if let Some(fixed_gamma) = self.state.fixed_gamma {
+            gammas.fill(fixed_gamma);
+            self.bp_decoder.set_memory_strengths_f64(gammas);
+            return;
+        }
+
         for i in 0..gammas.len() {
-            gammas[i] = self.state.uniform.sample(&mut self.state.rng_std);
+            gammas[i] = self
+                .state
+                .uniform
+                .as_ref()
+                .unwrap()
+                .sample(&mut self.state.rng_std);
         }
         self.bp_decoder.set_memory_strengths_f64(gammas);
     }
@@ -250,9 +277,9 @@ where
 
             let t_eff = tau / ((current_iter + 1) as f64).max(1.0);
             let mut p_kick = (-oscillation / t_eff).exp();
-            if parity_violations[check_idx] == 0 {
-                p_kick = 0.0;
-            }
+            // if parity_violations[check_idx] == 0 {
+            //     p_kick = 0.0;
+            // }
             p_kick = p_kick.clamp(0.0, 1.0);
 
             // One Bernoulli decision per check node: if true, reuse t-1 messages.
@@ -270,9 +297,11 @@ where
                 continue;
             }
 
-            let do_kick = self.state.rng_std.gen_bool(p_kick);
-            let damped = friction.clamp(0.0, 1.0) * raw;
-            let message = if do_kick { -damped } else { damped };
+            // let do_kick = self.state.rng_std.gen_bool(p_kick);
+            // let damped = friction.clamp(0.0, 1.0) * raw;
+            let dammped = 1.0 * raw; // In dropout version, we skip the Langevin "kick" and only apply damping to the new messages.
+            // let message = if do_kick { -damped } else { damped };
+            let message = dammped;
             modified_messages[edge_idx] = N::from_f64(message).unwrap_or_else(N::zero);
         }
 

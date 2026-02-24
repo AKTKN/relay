@@ -68,7 +68,8 @@ impl Default for RelayDecoderConfig {
 #[derive(Clone)]
 struct PosteriorUpdateState {
     rng_std: rand::rngs::StdRng,
-    uniform: rand::distributions::Uniform<f64>,
+    uniform: Option<rand::distributions::Uniform<f64>>,
+    fixed_gamma: Option<f64>,
 }
 
 /// An ensemble decoder which controls an inner BP min-sum decoder.
@@ -176,8 +177,22 @@ where
         let rng_std: rand::prelude::StdRng = rand::rngs::StdRng::seed_from_u64(relay_config.seed);
         let low = relay_config.gamma_dist_interval.0;
         let high = relay_config.gamma_dist_interval.1;
-        let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
-        PosteriorUpdateState { rng_std, uniform }
+
+        // If both endpoints are equal, treat gamma as a fixed value and skip random sampling.
+        if low == high {
+            PosteriorUpdateState {
+                rng_std,
+                uniform: None,
+                fixed_gamma: Some(low),
+            }
+        } else {
+            let uniform: rand::distributions::Uniform<f64> = Uniform::new(low, high);
+            PosteriorUpdateState {
+                rng_std,
+                uniform: Some(uniform),
+                fixed_gamma: None,
+            }
+        }
     }
 
     fn init_next_set(&mut self, set_idx: usize) {
@@ -196,10 +211,19 @@ where
             self.bp_decoder.set_memory_strengths_f64(gammas);
             return;
         }
+
+        if let Some(fixed_gamma) = self.posterior_update_state.fixed_gamma {
+            gammas.fill(fixed_gamma);
+            self.bp_decoder.set_memory_strengths_f64(gammas);
+            return;
+        }
+
         for i in 0..gammas.len() {
             gammas[i] = self
                 .posterior_update_state
                 .uniform
+                .as_ref()
+                .unwrap()
                 .sample(&mut self.posterior_update_state.rng_std);
         }
         self.bp_decoder.set_memory_strengths_f64(gammas);
