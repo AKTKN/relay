@@ -420,6 +420,24 @@ where
         self.log_prior_ratios[variable]
     }
 
+    // Blend a BP marginal with the previous marginal using memory strength.
+    // This implements: M_t = (1 - gamma) * M'_t + gamma * M_{t-1}.
+    fn blend_marginal_with_memory(&self, bp_marginal: N, previous_marginal: N, variable: usize) -> N {
+        if self.config.gamma0.is_none() {
+            return bp_marginal;
+        }
+
+        if bp_marginal == N::max_value() {
+            return bp_marginal;
+        }
+
+        let scaled_one = self.data_scale_value.unwrap_or(N::one());
+        let gamma = self.memory_strengths[variable];
+        let bp_component = (bp_marginal / scaled_one) * (scaled_one - gamma);
+        let memory_component = (previous_marginal / scaled_one) * gamma;
+        bp_component + memory_component
+    }
+
     /// Compute bit to check message iteration
     fn compute_variable_to_check(&mut self) -> &mut SparseBipartiteGraph<N> {
         for (check_var_col_ind, check_var_col_vec) in
@@ -476,6 +494,69 @@ where
         &mut self.variable_to_check
     }
 
+    /// Compute bit-to-check messages for LRBP legs.
+    ///
+    /// This first computes the standard BP marginal M'_t = prior + incoming check messages,
+    /// then applies memory blending M_t = (1-gamma) * M'_t + gamma * M_{t-1}.
+    fn compute_variable_to_check_lrbp(&mut self) -> &mut SparseBipartiteGraph<N> {
+        for (check_var_col_ind, check_var_col_vec) in
+            self.check_to_variable.outer_iterator().enumerate()
+        {
+            // Start from the plain BP prior (without pre-mixing with memory).
+            let mut check_to_var_row_sum = self.log_prior_ratios[check_var_col_ind];
+
+            debug!("Check messages for col {check_var_col_ind:?}: {check_var_col_vec:?}");
+
+            let data_range = self
+                .check_to_variable
+                .indptr()
+                .outer_inds(check_var_col_ind);
+
+            // Perform iteration in the forward direction to accumulate left to right.
+            for (ind, check_var_row_val) in izip!(
+                data_range.clone(),
+                &self.check_to_variable.data()[data_range.clone()]
+            ) {
+                self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
+                    check_to_var_row_sum;
+                check_to_var_row_sum += *check_var_row_val;
+            }
+
+            let bp_marginal = check_to_var_row_sum;
+            let previous_marginal = self.posterior_ratios[check_var_col_ind];
+            self.posterior_ratios[check_var_col_ind] = self.blend_marginal_with_memory(
+                bp_marginal,
+                previous_marginal,
+                check_var_col_ind,
+            );
+
+            // Now perform iteration in the reverse direction to accumulate right to left.
+            check_to_var_row_sum = N::zero();
+            // Remove each message contribution.
+            for (ind, check_var_row_val) in izip!(
+                data_range.clone(),
+                &self.check_to_variable.data()[data_range.clone()]
+            )
+            .rev()
+            {
+                let map_ind = self.check_to_variable_nnz_map[ind];
+                self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
+                check_to_var_row_sum += *check_var_row_val;
+
+                debug!(
+                    "location ({:?}, {:?}), variable_to_check: {:.32}",
+                    self.check_to_variable.indices()[ind],
+                    check_var_col_ind,
+                    self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
+                );
+            }
+        }
+
+        self.bound_magnitudes();
+
+        &mut self.variable_to_check
+    }
+
     pub fn run_iteration(&mut self, detectors: ArrayView1<Bit>) {
         debug!("Iteration {:?} start", self.current_iteration);
         self.compute_check_to_variable(detectors);
@@ -492,6 +573,11 @@ where
 
     pub fn run_variable_to_check_update(&mut self) {
         self.compute_variable_to_check();
+        self.compute_hard_decision();
+    }
+
+    pub fn run_lrbp_variable_to_check_update(&mut self) {
+        self.compute_variable_to_check_lrbp();
         self.compute_hard_decision();
     }
 
