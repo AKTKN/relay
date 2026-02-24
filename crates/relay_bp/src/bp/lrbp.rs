@@ -231,7 +231,8 @@ where
                 self.bp_decoder.run_check_to_variable_update(detectors);
                 self.apply_langevin_modifier(history, &parity_violations, self.bp_decoder.current_iteration);
                 // Use LRBP-specific marginal blending after computing the plain BP marginal.
-                self.bp_decoder.run_lrbp_variable_to_check_update();
+                self.bp_decoder.run_variable_to_check_update();
+                // self.bp_decoder.run_lrbp_variable_to_check_update();
             } else {
                 self.bp_decoder.run_iteration(detectors);
             }
