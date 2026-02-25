@@ -276,10 +276,11 @@ where
             let friction = 1.0 / (1.0 + (-beta * (oscillation - delta)).exp());
 
             let t_eff = tau / ((current_iter + 1) as f64).max(1.0);
-            let mut p_kick = (-oscillation / t_eff).exp();
-            // if parity_violations[check_idx] == 0 {
-            //     p_kick = 0.0;
-            // }
+            // let mut p_kick = (-oscillation / t_eff).exp();
+            let mut p_kick = 0.3
+            if parity_violations[check_idx] == 0 {
+                p_kick = 0.0;
+            }
             p_kick = p_kick.clamp(0.0, 1.0);
 
             // One Bernoulli decision per check node: if true, reuse t-1 messages.
