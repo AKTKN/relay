@@ -224,5 +224,7 @@ pub enum BPExtraResult {
         leg_negative_llr_counts: Vec<usize>,
         leg_decodings: Vec<Array1<Bit>>,
         leg_posteriors: Vec<Array1<f64>>,
+        relay_parallel_avg_iter_seconds: Option<f64>,
+        dyn_phase_avg_iter_seconds: Option<f64>,
     },
 }

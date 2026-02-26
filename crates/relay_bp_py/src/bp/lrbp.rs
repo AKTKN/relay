@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use relay_bp::bp::lrbp::{LRBPDecoder, LRBPDecoderConfig};
+use relay_bp::bp::lrbp::{DynGammaMode, DynMode, LRBPDecoder, LRBPDecoderConfig};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::relay::StoppingCriterion;
 use relay_bp::decoder::Bit;
@@ -20,7 +20,9 @@ macro_rules! create_bp_interface {
             #[new]
             #[pyo3(signature = (check_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
                 set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
-                stopping_criterion="nconv".to_string(), logging=false, seed=0, osc_window=5, friction_slope=2.0, friction_shift=0.0, tau=0.2))]
+                stopping_criterion="nconv".to_string(), logging=false, seed=0, osc_window=5, friction_slope=2.0, friction_shift=0.0, tau=0.2,
+                r_dyn=0, t_dyn=0, dyn_mode="EBP".to_string(), gamma_dyn_penalty=0.0,
+                dyn_gamma_mode="fixed".to_string(), gamma_dyn_center=0.0, gamma_dyn_min=-0.24, gamma_dyn_max=0.66))]
             #[allow(clippy::missing_transmute_annotations, clippy::too_many_arguments)]
             pub fn new(
                 py: Python<'_>,
@@ -44,6 +46,14 @@ macro_rules! create_bp_interface {
                 friction_slope: f64,
                 friction_shift: f64,
                 tau: f64,
+                r_dyn: usize,
+                t_dyn: usize,
+                dyn_mode: String,
+                gamma_dyn_penalty: f64,
+                dyn_gamma_mode: String,
+                gamma_dyn_center: f64,
+                gamma_dyn_min: f64,
+                gamma_dyn_max: f64,
             ) -> PyResult<(Self, DynDecoder)> {
                 let min_sum_decoder = Self {};
 
@@ -68,6 +78,17 @@ macro_rules! create_bp_interface {
                     _ => StoppingCriterion::default(),
                 };
 
+                let dyn_mode = match dyn_mode.as_str() {
+                    "EBP" | "ebp" => DynMode::EBP,
+                    "PEBP" | "pebp" => DynMode::PEBP,
+                    _ => DynMode::EBP,
+                };
+
+                let dyn_gamma_mode = match dyn_gamma_mode.as_str() {
+                    "random" | "RANDOM" => DynGammaMode::Random,
+                    _ => DynGammaMode::Fixed,
+                };
+
                 let lrbp_config = LRBPDecoderConfig {
                     pre_iter,
                     num_sets,
@@ -82,6 +103,14 @@ macro_rules! create_bp_interface {
                     friction_slope,
                     friction_shift,
                     tau,
+                    r_dyn,
+                    t_dyn,
+                    dyn_mode,
+                    gamma_dyn_penalty,
+                    dyn_gamma_mode,
+                    gamma_dyn_center,
+                    gamma_dyn_min,
+                    gamma_dyn_max,
                 };
 
                 let inner_decoder = LRBPDecoder::<$type>::new(

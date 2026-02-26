@@ -132,11 +132,18 @@ impl DecodeResult {
                 leg_negative_llr_counts,
                 leg_decodings,
                 leg_posteriors,
+                relay_parallel_avg_iter_seconds,
+                dyn_phase_avg_iter_seconds,
             } => {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("leg_success", leg_success.clone())?;
                 dict.set_item("leg_iterations", leg_iterations.clone())?;
                 dict.set_item("leg_negative_llr_counts", leg_negative_llr_counts.clone())?;
+                dict.set_item(
+                    "relay_parallel_avg_iter_seconds",
+                    relay_parallel_avg_iter_seconds,
+                )?;
+                dict.set_item("dyn_phase_avg_iter_seconds", dyn_phase_avg_iter_seconds)?;
 
                 let py_decodings = pyo3::types::PyList::empty(py);
                 for arr in leg_decodings {

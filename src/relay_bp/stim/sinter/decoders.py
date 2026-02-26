@@ -278,6 +278,14 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
         friction_slope: float = 2.0,
         friction_shift: float = 0.0,
         tau: float = 0.2,
+        r_dyn: int = 0,
+        t_dyn: int = 0,
+        dyn_mode: str = "EBP",
+        gamma_dyn_penalty: float = 0.0,
+        dyn_gamma_mode: str = "fixed",
+        gamma_dyn_center: float = 0.0,
+        gamma_dyn_min: float = -0.24,
+        gamma_dyn_max: float = 0.66,
         parallel: bool = False,
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
@@ -298,6 +306,14 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
         self.friction_slope = friction_slope
         self.friction_shift = friction_shift
         self.tau = tau
+        self.r_dyn = r_dyn
+        self.t_dyn = t_dyn
+        self.dyn_mode = dyn_mode
+        self.gamma_dyn_penalty = gamma_dyn_penalty
+        self.dyn_gamma_mode = dyn_gamma_mode
+        self.gamma_dyn_center = gamma_dyn_center
+        self.gamma_dyn_min = gamma_dyn_min
+        self.gamma_dyn_max = gamma_dyn_max
         super().__init__(
             parallel=parallel,
             decomposed_hyperedges=decomposed_hyperedges,
@@ -326,6 +342,14 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
             friction_slope=self.friction_slope,
             friction_shift=self.friction_shift,
             tau=self.tau,
+            r_dyn=self.r_dyn,
+            t_dyn=self.t_dyn,
+            dyn_mode=self.dyn_mode,
+            gamma_dyn_penalty=self.gamma_dyn_penalty,
+            dyn_gamma_mode=self.dyn_gamma_mode,
+            gamma_dyn_center=self.gamma_dyn_center,
+            gamma_dyn_min=self.gamma_dyn_min,
+            gamma_dyn_max=self.gamma_dyn_max,
         )
 
         observable_decoder = relay_bp.ObservableDecoderRunner(
@@ -382,7 +406,21 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     relay_config = decoder_kwargs.copy()
     lrbp_config = decoder_kwargs.copy()
 
-    lrbp_only_keys = ["osc_window", "friction_slope", "friction_shift", "tau", "seed"]
+    lrbp_only_keys = [
+        "osc_window",
+        "friction_slope",
+        "friction_shift",
+        "tau",
+        "seed",
+        "r_dyn",
+        "t_dyn",
+        "dyn_mode",
+        "gamma_dyn_penalty",
+        "dyn_gamma_mode",
+        "gamma_dyn_center",
+        "gamma_dyn_min",
+        "gamma_dyn_max",
+    ]
     for key in lrbp_only_keys:
         relay_config.pop(key, None)
 

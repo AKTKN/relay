@@ -370,6 +370,8 @@ where
                     leg_negative_llr_counts,
                     leg_decodings,
                     leg_posteriors,
+                    relay_parallel_avg_iter_seconds: None,
+                    dyn_phase_avg_iter_seconds: None,
                 };
                 return result;
             }
@@ -445,6 +447,8 @@ where
             leg_negative_llr_counts,
             leg_decodings,
             leg_posteriors,
+            relay_parallel_avg_iter_seconds: None,
+            dyn_phase_avg_iter_seconds: None,
         };
 
         result

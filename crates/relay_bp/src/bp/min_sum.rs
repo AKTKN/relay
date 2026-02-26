@@ -202,6 +202,15 @@ where
         self.posterior_ratios = self.log_prior_ratios.clone();
     }
 
+    pub fn set_posterior_ratios_f64(&mut self, posterior_ratios: Array1<f64>) {
+        self.posterior_ratios = match self.config.data_scale_value {
+            Some(scale_val) => {
+                posterior_ratios.mapv_into_any(|v| N::from_f64(scale_val * v).unwrap())
+            }
+            None => posterior_ratios.mapv_into_any(|v| N::from_f64(v).unwrap()),
+        };
+    }
+
     /// Set external memory strengths from f64. Applies scaling if needed.
     pub fn set_memory_strengths_f64(&mut self, memory_strengths: Array1<f64>) {
         self.memory_strengths = match self.config.data_scale_value {
@@ -571,14 +580,140 @@ where
         self.compute_check_to_variable(detectors);
     }
 
+    pub fn run_check_to_variable_update_for_check(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        check_idx: usize,
+    ) {
+        let Some(var_check_row_vec) = self.variable_to_check.outer_view(check_idx) else {
+            return;
+        };
+
+        let alpha = self.alpha();
+        let row_sign = if detectors[check_idx] == 1 {
+            N::one().neg()
+        } else {
+            N::one()
+        };
+        let mut accumulated_sign = row_sign.is_negative();
+        let mut min_ind: usize = 0;
+        let mut min_message = N::max_value();
+        let mut second_min_message = N::max_value();
+
+        for (var_idx, msg) in var_check_row_vec.iter() {
+            accumulated_sign ^= msg.is_negative();
+            let abs_msg = msg.abs();
+            if abs_msg <= min_message {
+                second_min_message = min_message;
+                min_message = abs_msg;
+                min_ind = var_idx;
+            } else if abs_msg <= second_min_message {
+                second_min_message = abs_msg;
+            }
+        }
+
+        let scale = self.data_scale_value;
+        for (var_idx, msg) in var_check_row_vec.iter() {
+            let check_to_variable_sign = accumulated_sign ^ msg.is_negative();
+            let check_to_variable_min: N = if var_idx != min_ind {
+                min_message
+            } else {
+                second_min_message
+            };
+
+            let mut check_to_variable = alpha * check_to_variable_min;
+            if check_to_variable_sign {
+                check_to_variable = check_to_variable.neg();
+            }
+            if let Some(scale_val) = scale {
+                check_to_variable /= scale_val;
+            }
+
+            if let Some(nnz_idx) = self.check_to_variable.nnz_index(check_idx, var_idx) {
+                self.check_to_variable.data_mut()[nnz_idx.0] = check_to_variable;
+            }
+        }
+    }
+
     pub fn run_variable_to_check_update(&mut self) {
         self.compute_variable_to_check();
         self.compute_hard_decision();
     }
 
+    pub fn run_variable_to_check_update_for_variable(&mut self, variable_idx: usize) {
+        let check_neighbors = self.check_neighbors(variable_idx);
+        if check_neighbors.is_empty() {
+            return;
+        }
+
+        let mut sum = self.compute_variable_prior(variable_idx);
+        for check_idx in &check_neighbors {
+            if let Some(c2v_nnz_idx) = self.check_to_variable.nnz_index(*check_idx, variable_idx)
+            {
+                if let Some(v2c_nnz_idx) = self.variable_to_check.nnz_index(*check_idx, variable_idx)
+                {
+                    self.variable_to_check.data_mut()[v2c_nnz_idx.0] = sum;
+                    sum += self.check_to_variable.data()[c2v_nnz_idx.0];
+                }
+            }
+        }
+
+        self.posterior_ratios[variable_idx] = sum;
+
+        let mut reverse_sum = N::zero();
+        for check_idx in check_neighbors.iter().rev() {
+            if let Some(c2v_nnz_idx) = self.check_to_variable.nnz_index(*check_idx, variable_idx)
+            {
+                if let Some(v2c_nnz_idx) = self.variable_to_check.nnz_index(*check_idx, variable_idx)
+                {
+                    self.variable_to_check.data_mut()[v2c_nnz_idx.0] += reverse_sum;
+                    reverse_sum += self.check_to_variable.data()[c2v_nnz_idx.0];
+                }
+            }
+        }
+
+        self.bound_magnitudes();
+    }
+
     pub fn run_lrbp_variable_to_check_update(&mut self) {
         self.compute_variable_to_check_lrbp();
         self.compute_hard_decision();
+    }
+
+    pub fn recompute_hard_decision(&mut self) {
+        self.compute_hard_decision();
+    }
+
+    pub fn check_neighbors(&self, variable_idx: usize) -> Vec<usize> {
+        let Some(check_col_vec) = self.check_to_variable.outer_view(variable_idx) else {
+            return Vec::new();
+        };
+        check_col_vec.indices().to_vec()
+    }
+
+    pub fn variable_neighbors(&self, check_idx: usize) -> Vec<usize> {
+        let Some(var_row_vec) = self.variable_to_check.outer_view(check_idx) else {
+            return Vec::new();
+        };
+        var_row_vec.indices().to_vec()
+    }
+
+    pub fn posterior_ratios_f64(&self) -> Array1<f64> {
+        self.posterior_ratios.clone().mapv_into_any(|val| {
+            let posterior = N::to_f64(&val).unwrap_or(0.0);
+            match self.config.data_scale_value {
+                Some(scale_val) => posterior / scale_val,
+                None => posterior,
+            }
+        })
+    }
+
+    pub fn posterior_ratio_f64(&self, variable_idx: usize) -> f64 {
+        let posterior = N::to_f64(&self.posterior_ratios[variable_idx]).unwrap_or(0.0);
+        match self.config.data_scale_value {
+            Some(scale_val) => posterior / scale_val,
+            None => posterior,
+        }
     }
 
     pub fn check_to_variable_data(&self) -> &[N] {
