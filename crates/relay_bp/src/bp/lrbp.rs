@@ -32,6 +32,8 @@ pub struct LRBPDecoderConfig {
     pub pre_iter: usize,
     pub num_sets: usize,
     pub set_max_iter: usize,
+    pub odd_leg_max_iter: usize,
+    pub even_leg_uniform_gamma: f64,
     pub gamma_dist_interval: (f64, f64),
     pub explicit_gammas: Option<Array2<f64>>,
     pub stopping_criterion: StoppingCriterion,
@@ -57,6 +59,8 @@ impl Default for LRBPDecoderConfig {
             pre_iter: 80,
             num_sets: 300,
             set_max_iter: 60,
+            odd_leg_max_iter: 60,
+            even_leg_uniform_gamma: 0.0,
             gamma_dist_interval: (-0.24, 0.66),
             explicit_gammas: None,
             stopping_criterion: StoppingCriterion::NConv { stop_after: 1 },
@@ -259,6 +263,200 @@ where
         let mut memory_strengths = Array1::zeros(self.check_matrix().cols());
         memory_strengths.fill(gamma);
         self.bp_decoder.set_memory_strengths_f64(memory_strengths);
+    }
+
+    fn set_uniform_memory_strength(&mut self, gamma: f64) {
+        let mut memory_strengths = Array1::zeros(self.check_matrix().cols());
+        memory_strengths.fill(gamma);
+        self.bp_decoder.set_memory_strengths_f64(memory_strengths);
+    }
+
+    fn init_standard_leg_from_marginal(
+        &mut self,
+        carry_marginal: &Array1<f64>,
+        set_idx: usize,
+        fixed_gamma: Option<f64>,
+    ) {
+        self.bp_decoder.current_iteration = 0;
+        self.bp_decoder.set_log_prior_ratio_f64(carry_marginal.clone());
+        self.bp_decoder.set_posterior_ratios_f64(carry_marginal.clone());
+        self.bp_decoder.initialize_check_to_variable();
+        self.bp_decoder.initialize_variable_to_check();
+
+        match fixed_gamma {
+            Some(gamma) => self.set_uniform_memory_strength(gamma),
+            None => self.init_next_set(set_idx),
+        }
+    }
+
+    fn hard_decision_from_marginal(&self, marginal: &Array1<f64>) -> Array1<Bit> {
+        marginal.mapv(|x| if x < 0.0 { 1 } else { 0 })
+    }
+
+    fn syndrome_from_hard_decision(
+        &self,
+        detectors: ArrayView1<Bit>,
+        hard_decision: &Array1<Bit>,
+    ) -> Vec<u8> {
+        let check_matrix = self.bp_decoder.check_matrix().to_csr();
+        let mut residual = vec![0_u8; check_matrix.rows()];
+        for (row_idx, row_vec) in check_matrix.outer_iterator().enumerate() {
+            let mut parity = 0_u8;
+            for (col_idx, val) in row_vec.iter() {
+                if *val == 1 && hard_decision[col_idx] == 1 {
+                    parity ^= 1;
+                }
+            }
+            residual[row_idx] = parity ^ (detectors[row_idx] as u8);
+        }
+        residual
+    }
+
+    fn build_residual_targets(
+        &self,
+        detectors: ArrayView1<Bit>,
+        carry_marginal: &Array1<f64>,
+        check_neighbors: &[Vec<usize>],
+    ) -> (Vec<usize>, Vec<bool>) {
+        let hard_decision = self.hard_decision_from_marginal(carry_marginal);
+        let current_syndrome = self.syndrome_from_hard_decision(detectors, &hard_decision);
+
+        let mut target_checks = Vec::<usize>::new();
+        for check_idx in 0..current_syndrome.len() {
+            if detectors[check_idx] == 1 && current_syndrome[check_idx] == 1 {
+                target_checks.push(check_idx);
+            }
+        }
+
+        let mut target_variables = vec![false; self.bp_decoder.check_matrix().cols()];
+        for &check_idx in &target_checks {
+            for &var_idx in &check_neighbors[check_idx] {
+                target_variables[var_idx] = true;
+            }
+        }
+
+        (target_checks, target_variables)
+    }
+
+    fn build_even_leg_seed_marginal(
+        &self,
+        carry_marginal: &Array1<f64>,
+        target_variables: &[bool],
+        initial_prior: &Array1<f64>,
+    ) -> Array1<f64> {
+        let mut seed = carry_marginal.clone();
+        for var_idx in 0..seed.len() {
+            if target_variables[var_idx] {
+                seed[var_idx] = initial_prior[var_idx];
+            }
+        }
+        seed
+    }
+
+    fn run_standard_leg(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        max_iter: usize,
+    ) -> (DecodeResult, usize, f64) {
+        let mut success = false;
+        let mut decoded_detectors = Array1::default(detectors.dim());
+        let mut executed_iterations = 0usize;
+        let mut elapsed_seconds = 0.0_f64;
+
+        for _ in 0..max_iter {
+            let iter_started = Instant::now();
+            self.bp_decoder.run_iteration(detectors);
+            elapsed_seconds += iter_started.elapsed().as_secs_f64();
+            executed_iterations += 1;
+
+            decoded_detectors = self.bp_decoder.compute_decoded_detectors();
+            success = self
+                .bp_decoder
+                .check_convergence(detectors, decoded_detectors.view());
+
+            if success {
+                break;
+            }
+            self.bp_decoder.current_iteration += 1;
+        }
+
+        let mut result = self
+            .bp_decoder
+            .build_result(success, decoded_detectors, max_iter);
+        result.iterations = executed_iterations;
+        (result, executed_iterations, elapsed_seconds)
+    }
+
+    fn run_even_surgical_leg(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        max_iter: usize,
+        target_checks: &[usize],
+        target_variables: &[bool],
+        check_neighbors: &[Vec<usize>],
+    ) -> (DecodeResult, usize, f64) {
+        let mut success = false;
+        let mut decoded_detectors = Array1::default(detectors.dim());
+        let mut executed_iterations = 0usize;
+        let mut elapsed_seconds = 0.0_f64;
+
+        let mut is_target_check = vec![false; check_neighbors.len()];
+        for &check_idx in target_checks {
+            if check_idx < is_target_check.len() {
+                is_target_check[check_idx] = true;
+            }
+        }
+
+        for _ in 0..max_iter {
+            let iter_started = Instant::now();
+
+            let mut phase1_variables = vec![false; target_variables.len()];
+            for check_idx in 0..check_neighbors.len() {
+                if is_target_check[check_idx] {
+                    continue;
+                }
+                self.bp_decoder
+                    .run_check_to_variable_update_for_check(detectors, check_idx);
+                for &var_idx in &check_neighbors[check_idx] {
+                    phase1_variables[var_idx] = true;
+                }
+            }
+
+            for (var_idx, should_update) in phase1_variables.iter().enumerate() {
+                if *should_update {
+                    self.bp_decoder.run_variable_to_check_update_for_variable(var_idx);
+                }
+            }
+
+            for &check_idx in target_checks {
+                self.bp_decoder
+                    .run_check_to_variable_update_for_check(detectors, check_idx);
+                for &var_idx in &check_neighbors[check_idx] {
+                    self.bp_decoder.run_variable_to_check_update_for_variable(var_idx);
+                }
+            }
+
+            self.bp_decoder.recompute_hard_decision();
+
+            elapsed_seconds += iter_started.elapsed().as_secs_f64();
+            executed_iterations += 1;
+
+            decoded_detectors = self.bp_decoder.compute_decoded_detectors();
+            success = self
+                .bp_decoder
+                .check_convergence(detectors, decoded_detectors.view());
+
+            if success {
+                break;
+            }
+            self.bp_decoder.current_iteration += 1;
+        }
+
+        let mut result = self
+            .bp_decoder
+            .build_result(success, decoded_detectors, max_iter);
+        result.iterations = executed_iterations;
+        (result, executed_iterations, elapsed_seconds)
     }
 
     fn clear_history(&self, history: &mut Vec<VecDeque<f64>>) {
@@ -749,38 +947,37 @@ where
     }
 
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
-        let mut num_conv = 0;
-        let mut min_pm = f64::MAX;
+        // Legacy LRBP (Langevin/dropout/dynamic queue) code paths are intentionally retained in
+        // this file for experimental reference, but decode_detailed now uses the alternating
+        // relay/surgical-leg flow described by the current LR-BP experiment design.
+
+        let total_legs = self.lrbp_config.num_sets.max(1);
         let mut total_iterations: usize = 0;
-        let stopping_criterion = self.lrbp_config.stopping_criterion.clone();
-        let total_leg_capacity = self.lrbp_config.num_sets + 1 + self.lrbp_config.r_dyn;
-        let mut leg_success: Vec<bool> = Vec::with_capacity(total_leg_capacity);
-        let mut leg_iterations: Vec<usize> = Vec::with_capacity(total_leg_capacity);
-        let mut leg_negative_llr_counts: Vec<usize> =
-            Vec::with_capacity(total_leg_capacity);
-        let mut leg_decodings: Vec<Array1<Bit>> = Vec::with_capacity(total_leg_capacity);
-        let mut leg_posteriors: Vec<Array1<f64>> =
-            Vec::with_capacity(total_leg_capacity);
+
+        let mut leg_success: Vec<bool> = Vec::with_capacity(total_legs);
+        let mut leg_iterations: Vec<usize> = Vec::with_capacity(total_legs);
+        let mut leg_negative_llr_counts: Vec<usize> = Vec::with_capacity(total_legs);
+        let mut leg_decodings: Vec<Array1<Bit>> = Vec::with_capacity(total_legs);
+        let mut leg_posteriors: Vec<Array1<f64>> = Vec::with_capacity(total_legs);
+
         let mut relay_parallel_elapsed_seconds = 0.0_f64;
         let mut relay_parallel_iterations = 0usize;
         let mut dyn_phase_elapsed_seconds = 0.0_f64;
         let mut dyn_phase_iterations = 0usize;
 
         self.bp_decoder.initialize_decoder();
+        let initial_prior = self.bp_decoder.log_prior_ratios();
 
-        let num_edges = self.bp_decoder.check_to_variable_data().len();
-        let mut history: Vec<VecDeque<f64>> = (0..num_edges)
-            .map(|_| VecDeque::with_capacity(self.lrbp_config.osc_window.max(1)))
+        let num_checks = self.bp_decoder.check_matrix().rows();
+        let check_neighbors: Vec<Vec<usize>> = (0..num_checks)
+            .map(|check_idx| self.bp_decoder.variable_neighbors(check_idx))
             .collect();
 
-        let (mut result, pre_iter_count, pre_elapsed) = self.decode_inner(
-            detectors,
-            self.lrbp_config.pre_iter,
-            false,
-            history.as_mut_slice(),
-        );
+        let (mut result, pre_iter_count, pre_elapsed) =
+            self.run_standard_leg(detectors, self.lrbp_config.pre_iter);
         relay_parallel_elapsed_seconds += pre_elapsed;
         relay_parallel_iterations += pre_iter_count;
+        total_iterations += result.iterations;
 
         leg_success.push(result.success);
         leg_iterations.push(result.iterations);
@@ -789,50 +986,79 @@ where
         leg_posteriors.push(result.posterior_ratios.clone());
 
         if result.success {
-            num_conv += 1;
-            min_pm = result.decoding_quality;
-
-            let mut done = false;
-            if stopping_criterion == StoppingCriterion::PreIter {
-                done = true;
-            } else if let StoppingCriterion::NConv { stop_after } = stopping_criterion {
-                if num_conv >= stop_after {
-                    done = true;
-                }
-            }
-            if done {
-                result.extra = BPExtraResult::RelayTrace {
-                    leg_success,
-                    leg_iterations,
-                    leg_negative_llr_counts,
-                    leg_decodings,
-                    leg_posteriors,
-                    relay_parallel_avg_iter_seconds: if relay_parallel_iterations > 0 {
-                        Some(relay_parallel_elapsed_seconds / relay_parallel_iterations as f64)
-                    } else {
-                        None
-                    },
-                    dyn_phase_avg_iter_seconds: None,
-                };
-                return result;
-            }
+            result.iterations = total_iterations;
+            result.extra = BPExtraResult::RelayTrace {
+                leg_success,
+                leg_iterations,
+                leg_negative_llr_counts,
+                leg_decodings,
+                leg_posteriors,
+                relay_parallel_avg_iter_seconds: if relay_parallel_iterations > 0 {
+                    Some(relay_parallel_elapsed_seconds / relay_parallel_iterations as f64)
+                } else {
+                    None
+                },
+                dyn_phase_avg_iter_seconds: if dyn_phase_iterations > 0 {
+                    Some(dyn_phase_elapsed_seconds / dyn_phase_iterations as f64)
+                } else {
+                    None
+                },
+            };
+            return result;
         }
 
-        total_iterations += result.iterations;
-        for set in 1..=self.lrbp_config.num_sets {
-            self.init_next_set(set);
-            self.bp_decoder.current_iteration = 0;
-            self.clear_history(&mut history);
+        let mut carry_marginal = self.bp_decoder.posterior_ratios_f64();
 
-            let (temp_result, leg_iter_count, leg_elapsed) = self.decode_inner(
-                detectors,
-                self.lrbp_config.set_max_iter,
-                true,
-                history.as_mut_slice(),
-            );
-            relay_parallel_elapsed_seconds += leg_elapsed;
-            relay_parallel_iterations += leg_iter_count;
+        for leg_idx in 1..total_legs {
+            let (temp_result, leg_iter_count, leg_elapsed, is_surgical_leg) = if leg_idx == 1 {
+                self.init_standard_leg_from_marginal(&carry_marginal, leg_idx, None);
+                let (temp_result, leg_iter_count, leg_elapsed) =
+                    self.run_standard_leg(detectors, self.lrbp_config.set_max_iter);
+                (temp_result, leg_iter_count, leg_elapsed, false)
+            } else if leg_idx % 2 == 0 {
+                let (target_checks, target_variables) =
+                    self.build_residual_targets(detectors, &carry_marginal, &check_neighbors);
+                let seeded_marginal = self.build_even_leg_seed_marginal(
+                    &carry_marginal,
+                    &target_variables,
+                    &initial_prior,
+                );
 
+                self.bp_decoder.current_iteration = 0;
+                self.bp_decoder.set_log_prior_ratio_f64(seeded_marginal.clone());
+                self.bp_decoder.set_posterior_ratios_f64(seeded_marginal);
+                self.bp_decoder.initialize_check_to_variable();
+                self.bp_decoder.initialize_variable_to_check();
+                self.set_uniform_memory_strength(self.lrbp_config.even_leg_uniform_gamma);
+
+                let (temp_result, leg_iter_count, leg_elapsed) = self.run_even_surgical_leg(
+                    detectors,
+                    self.lrbp_config.set_max_iter,
+                    &target_checks,
+                    &target_variables,
+                    &check_neighbors,
+                );
+                (temp_result, leg_iter_count, leg_elapsed, true)
+            } else {
+                self.init_standard_leg_from_marginal(
+                    &carry_marginal,
+                    leg_idx,
+                    None,
+                );
+                let (temp_result, leg_iter_count, leg_elapsed) =
+                    self.run_standard_leg(detectors, self.lrbp_config.odd_leg_max_iter);
+                (temp_result, leg_iter_count, leg_elapsed, false)
+            };
+
+            if is_surgical_leg {
+                dyn_phase_elapsed_seconds += leg_elapsed;
+                dyn_phase_iterations += leg_iter_count;
+            } else {
+                relay_parallel_elapsed_seconds += leg_elapsed;
+                relay_parallel_iterations += leg_iter_count;
+            }
+
+            total_iterations += temp_result.iterations;
             leg_success.push(temp_result.success);
             leg_iterations.push(temp_result.iterations);
             leg_negative_llr_counts.push(
@@ -845,75 +1071,12 @@ where
             leg_decodings.push(temp_result.decoding.clone());
             leg_posteriors.push(temp_result.posterior_ratios.clone());
 
-            total_iterations += temp_result.iterations;
-            if temp_result.success {
-                num_conv += 1;
-                let pm = temp_result.decoding_quality;
-                if pm < min_pm {
-                    min_pm = pm;
-                    result = temp_result;
-                }
-                if let StoppingCriterion::NConv { stop_after } = stopping_criterion {
-                    if num_conv >= stop_after {
-                        break;
-                    }
-                }
+            result = temp_result;
+            if result.success {
+                break;
             }
-        }
 
-        if num_conv == 0 && self.lrbp_config.r_dyn > 0 && self.lrbp_config.t_dyn > 0 {
-            let check_matrix = self.bp_decoder.check_matrix();
-            let num_checks = check_matrix.rows();
-            let num_variables = check_matrix.cols();
-            let check_neighbors: Vec<Vec<usize>> = (0..num_checks)
-                .map(|check_idx| self.bp_decoder.variable_neighbors(check_idx))
-                .collect();
-            let variable_neighbors: Vec<Vec<usize>> = (0..num_variables)
-                .map(|var_idx| self.bp_decoder.check_neighbors(var_idx))
-                .collect();
-
-            let mut carry_marginal = self.bp_decoder.posterior_ratios_f64();
-            let mut dyn_conv = 0usize;
-            let dyn_stop_after = match stopping_criterion {
-                StoppingCriterion::NConv { stop_after } => stop_after,
-                _ => usize::MAX,
-            };
-
-            for _dyn_leg in 0..self.lrbp_config.r_dyn {
-                self.init_dyn_leg(&carry_marginal);
-                let (dyn_result, dyn_iter_count, dyn_elapsed) =
-                    self.run_dyn_leg(detectors, &check_neighbors, &variable_neighbors);
-                dyn_phase_elapsed_seconds += dyn_elapsed;
-                dyn_phase_iterations += dyn_iter_count;
-
-                leg_success.push(dyn_result.success);
-                leg_iterations.push(dyn_result.iterations);
-                leg_negative_llr_counts.push(
-                    dyn_result
-                        .posterior_ratios
-                        .iter()
-                        .filter(|x| **x < 0.0)
-                        .count(),
-                );
-                leg_decodings.push(dyn_result.decoding.clone());
-                leg_posteriors.push(dyn_result.posterior_ratios.clone());
-
-                total_iterations += dyn_result.iterations;
-
-                if dyn_result.success {
-                    dyn_conv += 1;
-                    let pm = dyn_result.decoding_quality;
-                    if pm < min_pm {
-                        min_pm = pm;
-                        result = dyn_result;
-                    }
-                    if dyn_conv >= dyn_stop_after {
-                        break;
-                    }
-                }
-
-                carry_marginal = self.bp_decoder.posterior_ratios_f64();
-            }
+            carry_marginal = self.bp_decoder.posterior_ratios_f64();
         }
 
         result.iterations = total_iterations;

@@ -19,7 +19,8 @@ macro_rules! create_bp_interface {
         impl $name {
             #[new]
             #[pyo3(signature = (check_matrix, error_priors, alpha=None, alpha_iteration_scaling_factor=1.0, gamma0=0.1, data_scale_value=None, max_data_value=None, pre_iter=80, num_sets=300,
-                set_max_iter=60, gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
+                set_max_iter=60, odd_leg_max_iter=60, even_leg_uniform_gamma=0.0,
+                gamma_dist_interval=(-0.24, 0.66), explicit_gammas=None, stop_nconv=1,
                 stopping_criterion="nconv".to_string(), logging=false, seed=0, osc_window=5, friction_slope=2.0, friction_shift=0.0, tau=0.2,
                 r_dyn=0, t_dyn=0, dyn_mode="EBP".to_string(), gamma_dyn_penalty=0.0,
                 dyn_gamma_mode="fixed".to_string(), gamma_dyn_center=0.0, gamma_dyn_min=-0.24, gamma_dyn_max=0.66))]
@@ -36,6 +37,8 @@ macro_rules! create_bp_interface {
                 pre_iter: usize,
                 num_sets: usize,
                 set_max_iter: usize,
+                odd_leg_max_iter: usize,
+                even_leg_uniform_gamma: f64,
                 gamma_dist_interval: (f64, f64),
                 explicit_gammas: Option<&Bound<'_, PyArray2<f64>>>,
                 stop_nconv: usize,
@@ -93,6 +96,8 @@ macro_rules! create_bp_interface {
                     pre_iter,
                     num_sets,
                     set_max_iter,
+                    odd_leg_max_iter,
+                    even_leg_uniform_gamma,
                     gamma_dist_interval,
                     explicit_gammas: explicit_gammas
                         .map(|explicit_gammas| unsafe { explicit_gammas.as_array() }.to_owned()),
