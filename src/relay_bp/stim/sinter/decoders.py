@@ -164,8 +164,6 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         pre_iter: int = 60,
         num_sets: int = 60,
         set_max_iter: int = 60,
-        odd_leg_max_iter: int = 60,
-        even_leg_uniform_gamma: float = 0.0,
         gamma_dist_interval: tuple[float, float] = (-0.24, 0.66),
         explicit_gammas: np.ndarray | None = None,
         stop_nconv: int = 5,
@@ -182,8 +180,6 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         self.pre_iter = pre_iter
         self.num_sets = num_sets
         self.set_max_iter = set_max_iter
-        self.odd_leg_max_iter = odd_leg_max_iter
-        self.even_leg_uniform_gamma = even_leg_uniform_gamma
         self.gamma_dist_interval = tuple(gamma_dist_interval)
         self.explicit_gammas = explicit_gammas
         self.stop_nconv = stop_nconv
@@ -208,8 +204,6 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
             pre_iter=self.pre_iter,
             num_sets=self.num_sets,
             set_max_iter=self.set_max_iter,
-            odd_leg_max_iter=self.odd_leg_max_iter,
-            even_leg_uniform_gamma=self.even_leg_uniform_gamma,
             gamma_dist_interval=self.gamma_dist_interval,
             explicit_gammas=self.explicit_gammas,
             stop_nconv=self.stop_nconv,
@@ -423,6 +417,8 @@ def sinter_decoders(
     lrbp_config = decoder_kwargs.copy()
 
     lrbp_only_keys = [
+        "odd_leg_max_iter",
+        "even_leg_uniform_gamma",
         "osc_window",
         "friction_slope",
         "friction_shift",
