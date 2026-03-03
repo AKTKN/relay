@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pathlib
+from typing import Iterable
 
 from sinter import Decoder, CompiledDecoder
 import numpy as np
@@ -408,7 +409,10 @@ class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
         return observable_decoder
 
 
-def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
+def sinter_decoders(
+    selected_decoders: Iterable[str] | None = None,
+    **decoder_kwargs: dict,
+) -> dict[str, Decoder]:
     relay_config = decoder_kwargs.copy()
     lrbp_config = decoder_kwargs.copy()
 
@@ -447,9 +451,22 @@ def sinter_decoders(**decoder_kwargs: dict) -> dict[str, Decoder]:
     if gamma0 := decoder_kwargs.get("gamma0"):
         membp_config["gamma0"] = gamma0
 
-    return {
+    decoders = {
         "relay-bp": SinterDecoder_RelayBP(**relay_config),  # type: ignore
         "lr-bp": SinterDecoder_LRBP(**lrbp_config),  # type: ignore
         "mem-bp": SinterDecoder_MemBP(**membp_config),  # type: ignore
         "msl-bp": SinterDecoder_MSLBP(**msl_config),  # type: ignore
     }
+
+    if selected_decoders is None:
+        return decoders
+
+    selected = tuple(selected_decoders)
+    unknown = sorted(set(selected) - set(decoders))
+    if unknown:
+        raise ValueError(
+            "Unknown decoder(s) requested in selected_decoders: "
+            + ", ".join(unknown)
+        )
+
+    return {name: decoders[name] for name in selected}
