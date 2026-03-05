@@ -338,21 +338,6 @@ where
         (target_checks, target_variables)
     }
 
-    fn build_even_leg_seed_marginal(
-        &self,
-        carry_marginal: &Array1<f64>,
-        target_variables: &[bool],
-        initial_prior: &Array1<f64>,
-    ) -> Array1<f64> {
-        let mut seed = carry_marginal.clone();
-        for var_idx in 0..seed.len() {
-            if target_variables[var_idx] {
-                seed[var_idx] = initial_prior[var_idx];
-            }
-        }
-        seed
-    }
-
     fn run_standard_leg(
         &mut self,
         detectors: ArrayView1<Bit>,
@@ -966,7 +951,6 @@ where
         let mut dyn_phase_iterations = 0usize;
 
         self.bp_decoder.initialize_decoder();
-        let initial_prior = self.bp_decoder.log_prior_ratios();
 
         let num_checks = self.bp_decoder.check_matrix().rows();
         let check_neighbors: Vec<Vec<usize>> = (0..num_checks)
@@ -1018,11 +1002,7 @@ where
             } else if leg_idx % 2 == 0 {
                 let (target_checks, target_variables) =
                     self.build_residual_targets(detectors, &carry_marginal, &check_neighbors);
-                let seeded_marginal = self.build_even_leg_seed_marginal(
-                    &carry_marginal,
-                    &target_variables,
-                    &initial_prior,
-                );
+                let seeded_marginal = carry_marginal.clone();
 
                 self.bp_decoder.current_iteration = 0;
                 self.bp_decoder.set_log_prior_ratio_f64(seeded_marginal.clone());

@@ -12,6 +12,7 @@ pub mod min_sum;
 pub mod min_sum_fixed;
 pub mod lrbp;
 pub mod relay;
+pub mod slg_mbp;
 
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult};
@@ -34,6 +35,7 @@ pub fn _bp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<lrbp::LRBPDecoderF64>()?;
     m.add_class::<lrbp::LRBPDecoderI32>()?;
     m.add_class::<lrbp::LRBPDecoderI64>()?;
+    m.add_class::<slg_mbp::SLGMBPDecoderF64>()?;
     Ok(())
 }
 

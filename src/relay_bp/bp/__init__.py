@@ -20,6 +20,7 @@ __all__ = [
     "LRBPDecoderF64",
     "LRBPDecoderI32",
     "LRBPDecoderI64",
+    "SLGMBPDecoderF64",
     "MinSumBPDecoderF32",
     "MinSumBPDecoderF64",
     "MinSumBPDecoderI8",
@@ -38,6 +39,7 @@ LRBPDecoderF32 = _bp.LRBPDecoderF32
 LRBPDecoderF64 = _bp.LRBPDecoderF64
 LRBPDecoderI32 = _bp.LRBPDecoderI32
 LRBPDecoderI64 = _bp.LRBPDecoderI64
+SLGMBPDecoderF64 = _bp.SLGMBPDecoderF64
 MinSumBPDecoderF32 = _bp.MinSumBPDecoderF32
 MinSumBPDecoderF64 = _bp.MinSumBPDecoderF64
 MinSumBPDecoderI8 = _bp.MinSumBPDecoderI8

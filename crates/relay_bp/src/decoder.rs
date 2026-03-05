@@ -227,4 +227,14 @@ pub enum BPExtraResult {
         relay_parallel_avg_iter_seconds: Option<f64>,
         dyn_phase_avg_iter_seconds: Option<f64>,
     },
+    SLGMBPTrace {
+        phase1_converged: bool,
+        phase1_iterations: usize,
+        total_iterations: usize,
+        generation_count: usize,
+        generation_best_fitness: Vec<f64>,
+        selected_solution_posterior: Option<Array1<f64>>,
+        residual_weight_history: Vec<usize>,
+        gamma_history: Vec<f64>,
+    },
 }

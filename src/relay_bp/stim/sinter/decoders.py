@@ -31,18 +31,22 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         parallel: bool = False,
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
+        collect_iteration_metric: bool = False,
     ):
         self.observable_decoder = observable_decoder
         self.parallel = parallel
         self.check_matrices = check_matrices
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
+        self.collect_iteration_metric = collect_iteration_metric
+        self._last_decode_aux: dict[str, np.ndarray] | None = None
 
     def decode_shots_bit_packed(
         self,
         *,
         bit_packed_detection_event_data: "np.ndarray",
     ) -> "np.ndarray":
+        self._last_decode_aux = None
 
         syndromes = np.unpackbits(
             bit_packed_detection_event_data, bitorder="little", axis=1
@@ -51,18 +55,40 @@ class SinterCompiledDecoder_BP(CompiledDecoder):
         if self.check_matrices.syndrome_bias is not None:
             syndromes = (syndromes + self.check_matrices.syndrome_bias) % 2
 
-        predictions = self.observable_decoder.decode_observables_batch(
-            syndromes,
-            parallel=self.parallel,
-            progress_bar=self.show_progress,
-            leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
-        )
+        if self.collect_iteration_metric:
+            detailed = self.observable_decoder.decode_observables_detailed_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
+            predictions = np.asarray([entry.observables for entry in detailed], dtype=np.uint8)
+            self._last_decode_aux = {
+                "iterations": np.asarray(
+                    [int(entry.iterations) for entry in detailed], dtype=np.int64
+                ),
+                "converged": np.asarray(
+                    [bool(entry.converged) for entry in detailed], dtype=np.bool_
+                ),
+            }
+        else:
+            predictions = self.observable_decoder.decode_observables_batch(
+                syndromes,
+                parallel=self.parallel,
+                progress_bar=self.show_progress,
+                leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            )
 
         if self.check_matrices.observables_bias is not None:
             predictions = (predictions + self.check_matrices.observables_bias) % 2
 
         outputs = np.packbits(predictions, axis=1, bitorder="little")
         return outputs
+
+    def pop_last_decode_aux(self) -> dict[str, np.ndarray] | None:
+        aux = self._last_decode_aux
+        self._last_decode_aux = None
+        return aux
 
 
 class SinterDecoder_BaseBP(Decoder):
@@ -74,6 +100,7 @@ class SinterDecoder_BaseBP(Decoder):
         threshold: float = 0.0,
         show_progress: bool = False,
         leave_progress_bar_on_finish: bool = False,
+        collect_iteration_metric: bool = False,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.parallel = parallel
@@ -82,6 +109,7 @@ class SinterDecoder_BaseBP(Decoder):
         self.threshold = threshold
         self.show_progress = show_progress
         self.leave_progress_bar_on_finish = leave_progress_bar_on_finish
+        self.collect_iteration_metric = collect_iteration_metric
 
     def build_observable_decoder(
         self, dem: stim.DetectorErrorModel
@@ -104,6 +132,7 @@ class SinterDecoder_BaseBP(Decoder):
             parallel=self.parallel,
             show_progress=self.show_progress,
             leave_progress_bar_on_finish=self.leave_progress_bar_on_finish,
+            collect_iteration_metric=self.collect_iteration_metric,
         )
 
     def decode_via_files(
@@ -173,6 +202,7 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.alpha = alpha
@@ -190,6 +220,7 @@ class SinterDecoder_RelayBP(SinterDecoder_BaseBP):
             decomposed_hyperedges=decomposed_hyperedges,
             prune_decided_errors=prune_decided_errors,
             threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
         )
 
     def build_observable_decoder(
@@ -229,6 +260,7 @@ class SinterDecoder_MemBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
     ):
         f"""Class for decoding stim circuits with sinter and mem-bp."""
         self.max_iter = max_iter
@@ -239,6 +271,7 @@ class SinterDecoder_MemBP(SinterDecoder_BaseBP):
             decomposed_hyperedges=decomposed_hyperedges,
             prune_decided_errors=prune_decided_errors,
             threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
         )
 
     def build_observable_decoder(
@@ -293,6 +326,7 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
     ):
         self.alpha = alpha
         self.gamma0 = gamma0
@@ -324,6 +358,7 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
             decomposed_hyperedges=decomposed_hyperedges,
             prune_decided_errors=prune_decided_errors,
             threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
         )
 
     def build_observable_decoder(
@@ -367,6 +402,102 @@ class SinterDecoder_LRBP(SinterDecoder_BaseBP):
         return observable_decoder
 
 
+class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
+    def __init__(
+        self,
+        alpha: float | None = None,
+        ensemble_size: int = 64,
+        t_ms: int = 16,
+        t_mem: int = 16,
+        g_max: int = 30,
+        sigma2: float = 0.15,
+        delta: float = 0.2,
+        fitness_alpha: float = 1000.0,
+        fitness_beta: float = 1.0,
+        eta: float = 1.0,
+        mutation_rate: float = 0.02,
+        mutation_llr_abs_threshold: float = 0.25,
+        init_perturbation_mode: str = "gaussian",
+        selection_mode: str = "weighted",
+        weighted_selection_mode: str = "softmax",
+        gamma_mode: str = "fixed",
+        gamma_fixed: float = 0.125,
+        gamma_interval: tuple[float, float] = (0.0, 0.25),
+        tournament_size: int = 3,
+        elite_count: int = 2,
+        seed: int = 0,
+        parallel: bool = False,
+        decomposed_hyperedges: bool | None = None,
+        prune_decided_errors: bool = True,
+        threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
+    ):
+        self.alpha = alpha
+        self.ensemble_size = ensemble_size
+        self.t_ms = t_ms
+        self.t_mem = t_mem
+        self.g_max = g_max
+        self.sigma2 = sigma2
+        self.delta = delta
+        self.fitness_alpha = fitness_alpha
+        self.fitness_beta = fitness_beta
+        self.eta = eta
+        self.mutation_rate = mutation_rate
+        self.mutation_llr_abs_threshold = mutation_llr_abs_threshold
+        self.init_perturbation_mode = init_perturbation_mode
+        self.selection_mode = selection_mode
+        self.weighted_selection_mode = weighted_selection_mode
+        self.gamma_mode = gamma_mode
+        self.gamma_fixed = gamma_fixed
+        self.gamma_interval = tuple(gamma_interval)
+        self.tournament_size = tournament_size
+        self.elite_count = elite_count
+        self.seed = seed
+        super().__init__(
+            parallel=parallel,
+            decomposed_hyperedges=decomposed_hyperedges,
+            prune_decided_errors=prune_decided_errors,
+            threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
+        )
+
+    def build_observable_decoder(
+        self, check_matrices: CheckMatrices
+    ) -> relay_bp.ObservableDecoderRunner:
+        decoder = relay_bp.SLGMBPDecoderF64(
+            check_matrices.check_matrix,
+            error_priors=check_matrices.error_priors,
+            alpha=None if self.alpha == 0.0 else self.alpha,
+            ensemble_size=self.ensemble_size,
+            t_ms=self.t_ms,
+            t_mem=self.t_mem,
+            g_max=self.g_max,
+            sigma2=self.sigma2,
+            delta=self.delta,
+            fitness_alpha=self.fitness_alpha,
+            fitness_beta=self.fitness_beta,
+            eta=self.eta,
+            mutation_rate=self.mutation_rate,
+            mutation_llr_abs_threshold=self.mutation_llr_abs_threshold,
+            init_perturbation_mode=self.init_perturbation_mode,
+            selection_mode=self.selection_mode,
+            weighted_selection_mode=self.weighted_selection_mode,
+            gamma_mode=self.gamma_mode,
+            gamma_fixed=self.gamma_fixed,
+            gamma_interval=self.gamma_interval,
+            tournament_size=self.tournament_size,
+            elite_count=self.elite_count,
+            seed=self.seed,
+        )
+
+        observable_decoder = relay_bp.ObservableDecoderRunner(
+            decoder,
+            check_matrices.observables_matrix,
+            include_decode_result=False,
+        )
+        return observable_decoder
+
+
 class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
 
     def __init__(
@@ -377,6 +508,7 @@ class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
         decomposed_hyperedges: bool | None = None,
         prune_decided_errors: bool = True,
         threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
     ):
         f"""Class for decoding stim circuits with sinter and relay-bp."""
         self.max_iter = max_iter
@@ -386,6 +518,7 @@ class SinterDecoder_MSLBP(SinterDecoder_BaseBP):
             decomposed_hyperedges=decomposed_hyperedges,
             prune_decided_errors=prune_decided_errors,
             threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
         )
 
     def build_observable_decoder(
@@ -415,6 +548,7 @@ def sinter_decoders(
 ) -> dict[str, Decoder]:
     relay_config = decoder_kwargs.copy()
     lrbp_config = decoder_kwargs.copy()
+    slg_mbp_config = decoder_kwargs.copy()
 
     lrbp_only_keys = [
         "odd_leg_max_iter",
@@ -436,6 +570,32 @@ def sinter_decoders(
     for key in lrbp_only_keys:
         relay_config.pop(key, None)
 
+    slg_mbp_only_keys = [
+        "ensemble_size",
+        "t_ms",
+        "t_mem",
+        "g_max",
+        "sigma2",
+        "delta",
+        "fitness_alpha",
+        "fitness_beta",
+        "eta",
+        "mutation_rate",
+        "mutation_llr_abs_threshold",
+        "init_perturbation_mode",
+        "selection_mode",
+        "weighted_selection_mode",
+        "gamma_mode",
+        "gamma_fixed",
+        "gamma_interval",
+        "tournament_size",
+        "elite_count",
+        "seed",
+    ]
+    for key in slg_mbp_only_keys:
+        relay_config.pop(key, None)
+        lrbp_config.pop(key, None)
+
     msl_config = {}
 
     if max_iter := decoder_kwargs.get("max_iter"):
@@ -454,6 +614,7 @@ def sinter_decoders(
     decoders = {
         "relay-bp": SinterDecoder_RelayBP(**relay_config),  # type: ignore
         "lr-bp": SinterDecoder_LRBP(**lrbp_config),  # type: ignore
+        "slg-mbp": SinterDecoder_SLGMBP(**slg_mbp_config),  # type: ignore
         "mem-bp": SinterDecoder_MemBP(**membp_config),  # type: ignore
         "msl-bp": SinterDecoder_MSLBP(**msl_config),  # type: ignore
     }

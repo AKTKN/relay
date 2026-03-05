@@ -161,6 +161,43 @@ impl DecodeResult {
             _ => Ok(py.None().into_bound(py).into_any()),
         }
     }
+
+    #[getter]
+    pub fn slg_mbp_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::SLGMBPTrace {
+                phase1_converged,
+                phase1_iterations,
+                total_iterations,
+                generation_count,
+                generation_best_fitness,
+                selected_solution_posterior,
+                residual_weight_history,
+                gamma_history,
+            } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("phase1_converged", phase1_converged)?;
+                dict.set_item("phase1_iterations", phase1_iterations)?;
+                dict.set_item("total_iterations", total_iterations)?;
+                dict.set_item("generation_count", generation_count)?;
+                dict.set_item("generation_best_fitness", generation_best_fitness)?;
+                dict.set_item("residual_weight_history", residual_weight_history)?;
+                dict.set_item("gamma_history", gamma_history)?;
+
+                if let Some(arr) = selected_solution_posterior {
+                    dict.set_item(
+                        "selected_solution_posterior",
+                        PyArray1::from_array(py, arr),
+                    )?;
+                } else {
+                    dict.set_item("selected_solution_posterior", py.None())?;
+                }
+
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
 }
 
 /// A Python module implemented in Rust.
