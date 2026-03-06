@@ -183,7 +183,9 @@ impl Decoder for SLGMBPDecoder {
         let mut generation_best_fitness = Vec::<f64>::new();
         let mut gamma_history = Vec::<f64>::new();
         let mut phase1_iterations = 0usize;
-        let mut phase1_success: Option<(usize, Array1<Bit>, Array1<f64>)> = None;
+        // Store (iters, llr_cost, decoding, posterior) for tie-breaking.
+        // For equal iteration counts, prefer the solution with smaller sum(bit_i * prior_llr_i).
+        let mut phase1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
 
         for init_llr in &init_population {
             let (decoding, posterior, iters, success, cumsum_abs) =
@@ -205,12 +207,25 @@ impl Decoder for SLGMBPDecoder {
             }
 
             if success {
+                let solution_llr_cost = decoding
+                    .iter()
+                    .zip(prior_llr.iter())
+                    .map(|(&bit, &llr)| (bit as f64) * llr)
+                    .sum::<f64>();
                 let replace = match phase1_success {
                     None => true,
-                    Some((best_iter, _, _)) => iters < best_iter,
+                    Some((best_iter, best_llr_cost, _, _)) => {
+                        iters < best_iter
+                            || (iters == best_iter && solution_llr_cost < best_llr_cost)
+                    }
                 };
                 if replace {
-                    phase1_success = Some((iters, decoding.clone(), posterior.clone()));
+                    phase1_success = Some((
+                        iters,
+                        solution_llr_cost,
+                        decoding.clone(),
+                        posterior.clone(),
+                    ));
                 }
                 // If a member converged in one iteration we already reached the minimum.
                 if iters == 1 {
@@ -222,7 +237,7 @@ impl Decoder for SLGMBPDecoder {
             members.push(PopulationMember { posterior, fitness });
         }
 
-        if let Some((phase1_success_iters, phase1_decoding, phase1_posterior)) = phase1_success {
+        if let Some((phase1_success_iters, _, phase1_decoding, phase1_posterior)) = phase1_success {
             return DecodeResult {
                 decoding: phase1_decoding.clone(),
                 decoded_detectors: self.get_detectors(phase1_decoding.view()),
@@ -267,7 +282,8 @@ impl Decoder for SLGMBPDecoder {
             let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
             let mut gen_best = f64::NEG_INFINITY;
             let mut generation_iterations = 0usize;
-            let mut generation_success: Option<(usize, Array1<Bit>, Array1<f64>)> = None;
+            // Store (iters, llr_cost, decoding, posterior) for tie-breaking.
+            let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
 
             for child in &children {
                 let (decoding, posterior, iters, success) =
@@ -291,12 +307,25 @@ impl Decoder for SLGMBPDecoder {
                 }
 
                 if success {
+                    let solution_llr_cost = decoding
+                        .iter()
+                        .zip(prior_llr.iter())
+                        .map(|(&bit, &llr)| (bit as f64) * llr)
+                        .sum::<f64>();
                     let replace = match generation_success {
                         None => true,
-                        Some((best_iter, _, _)) => iters < best_iter,
+                        Some((best_iter, best_llr_cost, _, _)) => {
+                            iters < best_iter
+                                || (iters == best_iter && solution_llr_cost < best_llr_cost)
+                        }
                     };
                     if replace {
-                        generation_success = Some((iters, decoding.clone(), posterior.clone()));
+                        generation_success = Some((
+                            iters,
+                            solution_llr_cost,
+                            decoding.clone(),
+                            posterior.clone(),
+                        ));
                     }
                     // Minimum possible iteration for this layer is 1.
                     if iters == 1 {
@@ -310,7 +339,7 @@ impl Decoder for SLGMBPDecoder {
                 next_members.push(PopulationMember { posterior, fitness });
             }
 
-            if let Some((gen_success_iters, gen_success_decoding, gen_success_posterior)) = generation_success {
+            if let Some((gen_success_iters, _, gen_success_decoding, gen_success_posterior)) = generation_success {
                 total_iterations += gen_success_iters;
                 let gen_decoded_detectors = self.get_detectors(gen_success_decoding.view());
                 return DecodeResult {
