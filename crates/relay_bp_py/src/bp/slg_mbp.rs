@@ -6,7 +6,8 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    GammaMode, InitPerturbationMode, SLGMBPDecoderConfig, SelectionMode, WeightedSelectionMode,
+    GammaMode, InitPerturbationMode, InitStrategy, SLGMBPDecoderConfig, SelectionMode,
+    WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
 use relay_bp::decoder::Bit;
@@ -41,6 +42,8 @@ impl SLGMBPDecoderF64 {
         init_perturbation_mode="gaussian".to_string(),
         selection_mode="weighted".to_string(),
         weighted_selection_mode="softmax".to_string(),
+        init_strategy="min-sum".to_string(),
+        init_gamma=0.125,
         gamma_mode="fixed".to_string(),
         gamma_fixed=0.125,
         gamma_interval=(0.0, 0.25),
@@ -71,6 +74,8 @@ impl SLGMBPDecoderF64 {
         init_perturbation_mode: String,
         selection_mode: String,
         weighted_selection_mode: String,
+        init_strategy: String,
+        init_gamma: f64,
         gamma_mode: String,
         gamma_fixed: f64,
         gamma_interval: (f64, f64),
@@ -107,6 +112,11 @@ impl SLGMBPDecoderF64 {
             _ => WeightedSelectionMode::Softmax,
         };
 
+        let init_strategy = match init_strategy.to_ascii_lowercase().as_str() {
+            "mem-bp" | "mem_bp" | "membp" => InitStrategy::MemBp,
+            _ => InitStrategy::MinSum,
+        };
+
         let gamma_mode = match gamma_mode.to_ascii_lowercase().as_str() {
             "interval_random" | "interval_random_per_generation" | "random_interval" => {
                 GammaMode::IntervalRandomPerGeneration
@@ -131,6 +141,8 @@ impl SLGMBPDecoderF64 {
             selection_mode,
             weighted_selection_mode: weighted_mode,
             init_perturbation_mode: init_mode,
+            init_strategy,
+            init_gamma,
             gamma_mode,
             gamma_fixed,
             gamma_interval,

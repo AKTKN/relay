@@ -25,6 +25,12 @@ pub enum GammaMode {
     IntervalRandomPerGeneration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitStrategy {
+    MinSum,
+    MemBp,
+}
+
 #[derive(Clone, Debug)]
 pub struct SLGMBPDecoderConfig {
     pub ensemble_size: usize,
@@ -46,6 +52,8 @@ pub struct SLGMBPDecoderConfig {
     pub gamma_mode: GammaMode,
     pub gamma_fixed: f64,
     pub gamma_interval: (f64, f64),
+    pub init_strategy: InitStrategy,
+    pub init_gamma: f64,
     pub seed: u64,
 }
 
@@ -71,6 +79,8 @@ impl Default for SLGMBPDecoderConfig {
             gamma_mode: GammaMode::Fixed,
             gamma_fixed: 0.125,
             gamma_interval: (0.0, 0.25),
+            init_strategy: InitStrategy::MinSum,
+            init_gamma: 0.125,
             seed: 0,
         }
     }

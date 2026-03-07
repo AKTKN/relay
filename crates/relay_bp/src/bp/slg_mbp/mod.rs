@@ -12,7 +12,7 @@ pub mod ga_ops;
 pub mod init_population;
 pub mod trace;
 
-use config::{GammaMode, SLGMBPDecoderConfig};
+use config::{GammaMode, InitStrategy, SLGMBPDecoderConfig};
 use evaluate::{fitness_from_final_marginal, fitness_from_ms_cumsum, residual_weight};
 use ga_ops::{build_next_generation, PopulationMember};
 use init_population::initialize_llr_population;
@@ -90,11 +90,12 @@ impl SLGMBPDecoder {
         prior_llr: &Array1<f64>,
         child_llr: &Array1<f64>,
         gamma: f64,
+        max_iter: usize,
     ) -> (Array1<Bit>, Array1<f64>, usize, bool) {
         let priors_prob = self.base_min_sum_config.error_priors.clone();
         let cfg = self
             .config
-            .min_sum_template_from_priors(priors_prob, self.config.t_mem);
+            .min_sum_template_from_priors(priors_prob, max_iter);
         let mut decoder = MinSumBPDecoder::<f64>::new(self.check_matrix.clone(), Arc::new(cfg));
 
         let mut prev_marginal = child_llr.mapv(|v| self.config.eta * v);
@@ -108,7 +109,7 @@ impl SLGMBPDecoder {
         let mut decoded = decoder.compute_decoded_detectors();
         let mut success = false;
 
-        for _ in 0..self.config.t_mem {
+        for _ in 0..max_iter {
             let bias = prior_llr.mapv(|p| (1.0 - gamma) * p) + prev_marginal.mapv(|m| gamma * m);
             decoder.set_log_prior_ratio_f64(bias);
 
@@ -166,7 +167,7 @@ impl Decoder for SLGMBPDecoder {
         let prior_llr = self.prior_llr();
         let mut rng = StdRng::seed_from_u64(self.config.seed);
 
-        // Phase 1: diversity initialization + Min-Sum BP.
+        // Phase 1: diversity initialization + configurable initial BP strategy.
         let init_population = initialize_llr_population(
             &prior_llr,
             self.config.init_perturbation_mode,
@@ -188,17 +189,39 @@ impl Decoder for SLGMBPDecoder {
         let mut phase1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
 
         for init_llr in &init_population {
-            let (decoding, posterior, iters, success, cumsum_abs) =
-                self.run_min_sum_phase(detectors, init_llr);
+            let (decoding, posterior, iters, success, fitness) = match self.config.init_strategy {
+                InitStrategy::MinSum => {
+                    let (decoding, posterior, iters, success, cumsum_abs) =
+                        self.run_min_sum_phase(detectors, init_llr);
+                    let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
+                    let fitness = fitness_from_ms_cumsum(
+                        residual,
+                        cumsum_abs,
+                        self.config.fitness_alpha,
+                        self.config.fitness_beta,
+                    );
+                    (decoding, posterior, iters, success, fitness)
+                }
+                InitStrategy::MemBp => {
+                    let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                        detectors,
+                        &prior_llr,
+                        init_llr,
+                        self.config.init_gamma,
+                        self.config.t_ms,
+                    );
+                    let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
+                    let fitness = fitness_from_final_marginal(
+                        residual,
+                        &posterior,
+                        self.config.fitness_alpha,
+                        self.config.fitness_beta,
+                    );
+                    (decoding, posterior, iters, success, fitness)
+                }
+            };
             // Ensemble members are treated as parallel within this layer.
             phase1_iterations = phase1_iterations.max(iters);
-            let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
-            let fitness = fitness_from_ms_cumsum(
-                residual,
-                cumsum_abs,
-                self.config.fitness_alpha,
-                self.config.fitness_beta,
-            );
 
             if fitness > best_fitness {
                 best_fitness = fitness;
@@ -287,7 +310,13 @@ impl Decoder for SLGMBPDecoder {
 
             for child in &children {
                 let (decoding, posterior, iters, success) =
-                    self.run_mem_bp_phase(detectors, &prior_llr, child, generation_gamma);
+                    self.run_mem_bp_phase(
+                        detectors,
+                        &prior_llr,
+                        child,
+                        generation_gamma,
+                        self.config.t_mem,
+                    );
 
                 let decoded_detectors = self.get_detectors(decoding.view());
                 let residual = residual_weight(&decoded_detectors, detectors);

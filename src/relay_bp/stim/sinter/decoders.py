@@ -418,6 +418,8 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         mutation_rate: float = 0.02,
         mutation_llr_abs_threshold: float = 0.25,
         init_perturbation_mode: str = "gaussian",
+        init_strategy: str = "min-sum",
+        init_gamma: float = 0.125,
         selection_mode: str = "weighted",
         weighted_selection_mode: str = "softmax",
         gamma_mode: str = "fixed",
@@ -445,6 +447,8 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         self.mutation_rate = mutation_rate
         self.mutation_llr_abs_threshold = mutation_llr_abs_threshold
         self.init_perturbation_mode = init_perturbation_mode
+        self.init_strategy = init_strategy
+        self.init_gamma = init_gamma
         self.selection_mode = selection_mode
         self.weighted_selection_mode = weighted_selection_mode
         self.gamma_mode = gamma_mode
@@ -480,6 +484,8 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             mutation_rate=self.mutation_rate,
             mutation_llr_abs_threshold=self.mutation_llr_abs_threshold,
             init_perturbation_mode=self.init_perturbation_mode,
+            init_strategy=self.init_strategy,
+            init_gamma=self.init_gamma,
             selection_mode=self.selection_mode,
             weighted_selection_mode=self.weighted_selection_mode,
             gamma_mode=self.gamma_mode,
@@ -583,6 +589,8 @@ def sinter_decoders(
         "mutation_rate",
         "mutation_llr_abs_threshold",
         "init_perturbation_mode",
+        "init_strategy",
+        "init_gamma",
         "selection_mode",
         "weighted_selection_mode",
         "gamma_mode",
