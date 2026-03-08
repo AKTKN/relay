@@ -19,6 +19,75 @@ use relay_bp::decoder::{
     Bit, DecodeResult as DecodeResultInner, Decoder as DecoderInner, SparseBitMatrix,
 };
 
+fn slg_mbp_dynamics_entries_to_py<'py>(
+    py: Python<'py>,
+    entries: &[relay_bp::bp::slg_mbp::trace::SLGMBPDynamicsEntry],
+) -> PyResult<Bound<'py, PyAny>> {
+    let py_entries = pyo3::types::PyList::empty(py);
+    for entry in entries {
+        let entry_dict = pyo3::types::PyDict::new(py);
+        entry_dict.set_item("stage", entry.stage.as_str())?;
+        entry_dict.set_item("generation_index", entry.generation_index)?;
+        entry_dict.set_item("member_index", entry.member_index)?;
+        entry_dict.set_item("residual_syndrome_count", entry.residual_syndrome_count)?;
+        entry_dict.set_item(
+            "residual_adjacent_variable_count",
+            entry.residual_adjacent_variable_count,
+        )?;
+        entry_dict.set_item("score", entry.score)?;
+        entry_dict.set_item(
+            "residual_adjacent_variable_indices",
+            entry.residual_adjacent_variable_indices.clone(),
+        )?;
+        entry_dict.set_item(
+            "residual_adjacent_variable_llrs",
+            entry.residual_adjacent_variable_llrs.clone(),
+        )?;
+        entry_dict.set_item("converged", entry.converged)?;
+        entry_dict.set_item("iteration_count", entry.iteration_count)?;
+        entry_dict.set_item("estimated_error_weight", entry.estimated_error_weight)?;
+        py_entries.append(entry_dict)?;
+    }
+    Ok(py_entries.into_any())
+}
+
+fn slg_mbp_score_spike_trace_to_py<'py>(
+    py: Python<'py>,
+    trace: &relay_bp::bp::slg_mbp::trace::SLGMBPScoreSpikeTrace,
+) -> PyResult<Bound<'py, PyAny>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("spike_generation_index", trace.spike_generation_index)?;
+    dict.set_item("previous_generation_index", trace.previous_generation_index)?;
+    dict.set_item("spike_prev_score", trace.spike_prev_score)?;
+    dict.set_item("spike_score", trace.spike_score)?;
+    dict.set_item("spike_delta_score", trace.spike_delta_score)?;
+    dict.set_item("spike_delta_order_log10", trace.spike_delta_order_log10)?;
+    dict.set_item("window_start_generation", trace.window_start_generation)?;
+    dict.set_item("window_end_generation", trace.window_end_generation)?;
+    dict.set_item(
+        "spike_residual_adjacent_variable_indices",
+        trace.spike_residual_adjacent_variable_indices.clone(),
+    )?;
+
+    let snapshots = pyo3::types::PyList::empty(py);
+    for snap in &trace.snapshots {
+        let sd = pyo3::types::PyDict::new(py);
+        sd.set_item("generation_index", snap.generation_index)?;
+        sd.set_item(
+            "posterior_llr_all_variables",
+            snap.posterior_llr_all_variables.clone(),
+        )?;
+        sd.set_item(
+            "memory_strength_all_variables",
+            snap.memory_strength_all_variables.clone(),
+        )?;
+        snapshots.append(sd)?;
+    }
+    dict.set_item("snapshots", snapshots)?;
+
+    Ok(dict.into_any())
+}
+
 pub fn get_sprs_bit_matrix_from_python(
     py: Python<'_>,
     matrix: &Bound<'_, PyAny>,
@@ -174,6 +243,8 @@ impl DecodeResult {
                 selected_solution_posterior,
                 residual_weight_history,
                 gamma_history,
+                detailed_dynamics: _,
+                score_spike_trace,
             } => {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("phase1_converged", phase1_converged)?;
@@ -193,7 +264,50 @@ impl DecodeResult {
                     dict.set_item("selected_solution_posterior", py.None())?;
                 }
 
+                if let Some(trace) = score_spike_trace {
+                    dict.set_item("score_spike_trace", slg_mbp_score_spike_trace_to_py(py, trace)?)?;
+                } else {
+                    dict.set_item("score_spike_trace", py.None())?;
+                }
+
                 Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
+
+    #[getter]
+    pub fn slg_mbp_detailed_dynamics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::SLGMBPTrace {
+                detailed_dynamics,
+                ..
+            } => {
+                if let Some(trace) = detailed_dynamics {
+                    let dict = pyo3::types::PyDict::new(py);
+                    dict.set_item("observed_syndrome_weight", trace.observed_syndrome_weight)?;
+                    dict.set_item("entries", slg_mbp_dynamics_entries_to_py(py, &trace.entries)?)?;
+                    Ok(dict.into_any())
+                } else {
+                    Ok(py.None().into_bound(py).into_any())
+                }
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
+
+    #[getter]
+    pub fn slg_mbp_score_spike_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::SLGMBPTrace {
+                score_spike_trace,
+                ..
+            } => {
+                if let Some(trace) = score_spike_trace {
+                    slg_mbp_score_spike_trace_to_py(py, trace)
+                } else {
+                    Ok(py.None().into_bound(py).into_any())
+                }
             }
             _ => Ok(py.None().into_bound(py).into_any()),
         }

@@ -23,6 +23,7 @@ pub type SparseBitMatrix = SparseBipartiteGraph<Bit>;
 use dyn_clone::DynClone;
 
 use std::sync::Arc;
+use crate::bp::slg_mbp::trace::{SLGMBPDetailedDynamicsTrace, SLGMBPScoreSpikeTrace};
 
 pub trait Mod2Mul<Rhs = Self> {
     type Output;
@@ -49,6 +50,9 @@ pub trait Decoder: DynClone + Sync {
         self.decode_detailed(detectors).decoding
     }
     fn decode_detailed(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult;
+    fn decode_detailed_dynamics(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        self.decode_detailed(detectors)
+    }
     fn decode_batch(&mut self, detectors: ArrayView2<Bit>) -> Array2<Bit> {
         let arrs: Vec<Array1<Bit>> = detectors
             .axis_iter(Axis(0))
@@ -236,5 +240,7 @@ pub enum BPExtraResult {
         selected_solution_posterior: Option<Array1<f64>>,
         residual_weight_history: Vec<usize>,
         gamma_history: Vec<f64>,
+        detailed_dynamics: Option<SLGMBPDetailedDynamicsTrace>,
+        score_spike_trace: Option<SLGMBPScoreSpikeTrace>,
     },
 }

@@ -1,6 +1,7 @@
 use ndarray::{Array1, ArrayView1};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::bp::min_sum::{MinSumBPDecoder, MinSumDecoderConfig};
@@ -12,10 +13,14 @@ pub mod ga_ops;
 pub mod init_population;
 pub mod trace;
 
-use config::{GammaMode, InitStrategy, SLGMBPDecoderConfig};
+use config::{GammaMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig};
 use evaluate::{fitness_from_final_marginal, fitness_from_ms_cumsum, residual_weight};
 use ga_ops::{build_next_generation, PopulationMember};
-use init_population::initialize_llr_population;
+use init_population::{initialize_llr_population, sample_perturbed_llr};
+use trace::{
+    SLGMBPDetailedDynamicsTrace, SLGMBPDynamicsEntry, SLGMBPScoreSpikeGenerationSnapshot,
+    SLGMBPScoreSpikeTrace,
+};
 
 #[derive(Clone)]
 pub struct SLGMBPDecoder {
@@ -89,7 +94,7 @@ impl SLGMBPDecoder {
         detectors: ArrayView1<'_, Bit>,
         prior_llr: &Array1<f64>,
         child_llr: &Array1<f64>,
-        gamma: f64,
+        gamma_per_variable: &Array1<f64>,
         max_iter: usize,
     ) -> (Array1<Bit>, Array1<f64>, usize, bool) {
         let priors_prob = self.base_min_sum_config.error_priors.clone();
@@ -110,7 +115,8 @@ impl SLGMBPDecoder {
         let mut success = false;
 
         for _ in 0..max_iter {
-            let bias = prior_llr.mapv(|p| (1.0 - gamma) * p) + prev_marginal.mapv(|m| gamma * m);
+            let one_minus_gamma = gamma_per_variable.mapv(|g| 1.0 - g);
+            let bias = (&one_minus_gamma * prior_llr) + (gamma_per_variable * &prev_marginal);
             decoder.set_log_prior_ratio_f64(bias);
 
             decoder.run_iteration(detectors);
@@ -132,18 +138,18 @@ impl SLGMBPDecoder {
         )
     }
 
-    fn sample_generation_gamma(&self, rng: &mut StdRng) -> f64 {
+    fn sample_generation_memory_strength(&self, n_variables: usize, rng: &mut StdRng) -> Array1<f64> {
         match self.config.gamma_mode {
-            GammaMode::Fixed => self.config.gamma_fixed,
-            // User requirement: sample once per generation, then keep fixed inside that generation.
-            GammaMode::IntervalRandomPerGeneration => {
+            GammaMode::Fixed => Array1::from_elem(n_variables, self.config.gamma_fixed),
+            // interval_random: sample one gamma per variable node in each generation.
+            GammaMode::IntervalRandomPerVariable => {
                 let (a, b) = self.config.gamma_interval;
                 let lo = a.min(b);
                 let hi = a.max(b);
                 if (hi - lo).abs() < f64::EPSILON {
-                    lo
+                    Array1::from_elem(n_variables, lo)
                 } else {
-                    rng.gen_range(lo..=hi)
+                    Array1::from_shape_simple_fn(n_variables, || rng.gen_range(lo..=hi))
                 }
             }
         }
@@ -151,6 +157,131 @@ impl SLGMBPDecoder {
 
     fn max_iter(&self) -> usize {
         self.config.t_ms + self.config.g_max * self.config.t_mem
+    }
+
+    fn estimated_error_weight(&self, decoding: &Array1<Bit>, prior_llr: &Array1<f64>) -> f64 {
+        decoding
+            .iter()
+            .zip(prior_llr.iter())
+            .map(|(&bit, &llr)| (bit as f64) * llr)
+            .sum::<f64>()
+    }
+
+    fn residual_check_indices(
+        &self,
+        decoded_detectors: &Array1<Bit>,
+        detectors: ArrayView1<'_, Bit>,
+    ) -> Vec<usize> {
+        decoded_detectors
+            .iter()
+            .zip(detectors.iter())
+            .enumerate()
+            .filter_map(|(idx, (a, b))| if *a != *b { Some(idx) } else { None })
+            .collect()
+    }
+
+    fn residual_adjacent_llrs(
+        &self,
+        check_matrix_csr: &SparseBitMatrix,
+        residual_checks: &[usize],
+        posterior: &Array1<f64>,
+    ) -> (Vec<usize>, Vec<f32>) {
+        let mut vars = BTreeSet::<usize>::new();
+        for &check_idx in residual_checks {
+            if let Some(row) = check_matrix_csr.outer_view(check_idx) {
+                for &var_idx in row.indices() {
+                    vars.insert(var_idx);
+                }
+            }
+        }
+
+        let var_indices: Vec<usize> = vars.into_iter().collect();
+        let llrs = var_indices
+            .iter()
+            .map(|&i| posterior[i] as f32)
+            .collect::<Vec<_>>();
+
+        (var_indices, llrs)
+    }
+
+    fn build_score_spike_trace(
+        &self,
+        generation_best_fitness: &[f64],
+        generation_best_posteriors: &[Array1<f64>],
+        generation_best_adjacent_variable_indices: &[Vec<usize>],
+        generation_memory_strengths: &[Array1<f64>],
+        gamma_history: &[f64],
+    ) -> Option<SLGMBPScoreSpikeTrace> {
+        if generation_best_fitness.len() < 2
+            || generation_best_posteriors.len() != generation_best_fitness.len()
+            || generation_best_adjacent_variable_indices.len() != generation_best_fitness.len()
+            || generation_memory_strengths.len() != generation_best_fitness.len()
+            || gamma_history.len() != generation_best_fitness.len()
+        {
+            return None;
+        }
+
+        let mut spike_generation_index: Option<usize> = None;
+        let mut best_delta = f64::NEG_INFINITY;
+
+        for gen in 1..generation_best_fitness.len() {
+            let prev = generation_best_fitness[gen - 1];
+            let curr = generation_best_fitness[gen];
+            if !(prev.is_finite() && curr.is_finite()) {
+                continue;
+            }
+            let delta = curr - prev;
+            if delta > best_delta {
+                best_delta = delta;
+                spike_generation_index = Some(gen);
+            }
+        }
+
+        let spike_gen = spike_generation_index?;
+        if !(best_delta.is_finite() && best_delta > 0.0) {
+            return None;
+        }
+
+        let prev_gen = spike_gen - 1;
+        let prev_score = generation_best_fitness[prev_gen];
+        let spike_score = generation_best_fitness[spike_gen];
+        let delta_order_log10 = if prev_score > 0.0 && spike_score > 0.0 {
+            Some(spike_score.log10() - prev_score.log10())
+        } else {
+            None
+        };
+
+        let window_start = spike_gen.saturating_sub(3);
+        let window_end = (spike_gen + 3).min(generation_best_fitness.len() - 1);
+
+        let mut snapshots = Vec::<SLGMBPScoreSpikeGenerationSnapshot>::new();
+        for gen in window_start..=window_end {
+            let posterior = generation_best_posteriors[gen].clone().to_vec();
+            let memory_strength_all_variables = generation_memory_strengths[gen].clone().to_vec();
+            if memory_strength_all_variables.len() != posterior.len() {
+                return None;
+            }
+            snapshots.push(SLGMBPScoreSpikeGenerationSnapshot {
+                generation_index: gen,
+                posterior_llr_all_variables: posterior,
+                memory_strength_all_variables,
+            });
+        }
+
+        Some(SLGMBPScoreSpikeTrace {
+            spike_generation_index: spike_gen,
+            previous_generation_index: prev_gen,
+            spike_prev_score: prev_score,
+            spike_score,
+            spike_delta_score: best_delta,
+            spike_delta_order_log10: delta_order_log10,
+            window_start_generation: window_start,
+            window_end_generation: window_end,
+            spike_residual_adjacent_variable_indices: generation_best_adjacent_variable_indices
+                [spike_gen]
+                .clone(),
+            snapshots,
+        })
     }
 }
 
@@ -203,11 +334,12 @@ impl Decoder for SLGMBPDecoder {
                     (decoding, posterior, iters, success, fitness)
                 }
                 InitStrategy::MemBp => {
+                    let gamma_vec = Array1::from_elem(prior_llr.len(), self.config.init_gamma);
                     let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
                         detectors,
                         &prior_llr,
                         init_llr,
-                        self.config.init_gamma,
+                        &gamma_vec,
                         self.config.t_ms,
                     );
                     let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
@@ -257,7 +389,11 @@ impl Decoder for SLGMBPDecoder {
                 continue;
             }
 
-            members.push(PopulationMember { posterior, fitness });
+            members.push(PopulationMember {
+                posterior,
+                fitness,
+                perturbed_prior: init_llr.clone(),
+            });
         }
 
         if let Some((phase1_success_iters, _, phase1_decoding, phase1_posterior)) = phase1_success {
@@ -278,6 +414,8 @@ impl Decoder for SLGMBPDecoder {
                     selected_solution_posterior: None,
                     residual_weight_history: Vec::new(),
                     gamma_history,
+                    detailed_dynamics: None,
+                    score_spike_trace: None,
                 },
             };
         }
@@ -291,16 +429,23 @@ impl Decoder for SLGMBPDecoder {
             let children = build_next_generation(
                 &members,
                 self.config.elite_count,
+                self.config.sequential_mc,
                 self.config.mutation_rate,
                 self.config.mutation_llr_abs_threshold,
                 self.config.selection_mode,
                 self.config.weighted_selection_mode,
+                self.config.perturbation_method,
                 self.config.tournament_size,
                 &mut rng,
             );
 
-            let generation_gamma = self.sample_generation_gamma(&mut rng);
-            gamma_history.push(generation_gamma);
+            let generation_gamma = self.sample_generation_memory_strength(prior_llr.len(), &mut rng);
+            let gamma_mean = if generation_gamma.is_empty() {
+                0.0
+            } else {
+                generation_gamma.sum() / (generation_gamma.len() as f64)
+            };
+            gamma_history.push(gamma_mean);
 
             let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
             let mut gen_best = f64::NEG_INFINITY;
@@ -308,15 +453,41 @@ impl Decoder for SLGMBPDecoder {
             // Store (iters, llr_cost, decoding, posterior) for tie-breaking.
             let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
 
-            for child in &children {
-                let (decoding, posterior, iters, success) =
-                    self.run_mem_bp_phase(
-                        detectors,
-                        &prior_llr,
-                        child,
-                        generation_gamma,
-                        self.config.t_mem,
-                    );
+            for mut child in children {
+                let phase_prior = if self.config.continue_perturbation {
+                    if self.config.sequential_mc {
+                        // Sequential MC replicates only marginals; perturbations are re-sampled per instance.
+                        child.perturbed_prior = sample_perturbed_llr(
+                            &prior_llr,
+                            self.config.init_perturbation_mode,
+                            self.config.sigma2,
+                            self.config.delta,
+                            &mut rng,
+                        );
+                        &child.perturbed_prior
+                    } else {
+                        if self.config.perturbation_method == PerturbationMethod::Resample {
+                            child.perturbed_prior = sample_perturbed_llr(
+                                &prior_llr,
+                                self.config.init_perturbation_mode,
+                                self.config.sigma2,
+                                self.config.delta,
+                                &mut rng,
+                            );
+                        }
+                        &child.perturbed_prior
+                    }
+                } else {
+                    &prior_llr
+                };
+
+                let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                    detectors,
+                    phase_prior,
+                    &child.posterior,
+                    &generation_gamma,
+                    self.config.t_mem,
+                );
 
                 let decoded_detectors = self.get_detectors(decoding.view());
                 let residual = residual_weight(&decoded_detectors, detectors);
@@ -365,7 +536,11 @@ impl Decoder for SLGMBPDecoder {
 
                 // No success yet in this generation: account the layer by max iters.
                 generation_iterations = generation_iterations.max(iters);
-                next_members.push(PopulationMember { posterior, fitness });
+                next_members.push(PopulationMember {
+                    posterior,
+                    fitness,
+                    perturbed_prior: child.perturbed_prior,
+                });
             }
 
             if let Some((gen_success_iters, _, gen_success_decoding, gen_success_posterior)) = generation_success {
@@ -388,6 +563,8 @@ impl Decoder for SLGMBPDecoder {
                         selected_solution_posterior: Some(gen_success_posterior),
                         residual_weight_history,
                         gamma_history,
+                        detailed_dynamics: None,
+                        score_spike_trace: None,
                     },
                 };
             }
@@ -414,6 +591,378 @@ impl Decoder for SLGMBPDecoder {
                 selected_solution_posterior: Some(best_posterior),
                 residual_weight_history,
                 gamma_history,
+                detailed_dynamics: None,
+                score_spike_trace: None,
+            },
+        }
+    }
+
+    fn decode_detailed_dynamics(&mut self, detectors: ArrayView1<Bit>) -> DecodeResult {
+        let prior_llr = self.prior_llr();
+        let mut rng = StdRng::seed_from_u64(self.config.seed);
+        let check_matrix_csr = self.check_matrix.to_csr();
+        let observed_syndrome_weight = detectors.iter().filter(|&&b| b == 1).count();
+
+        let init_population = initialize_llr_population(
+            &prior_llr,
+            self.config.init_perturbation_mode,
+            self.config.ensemble_size,
+            self.config.sigma2,
+            self.config.delta,
+            &mut rng,
+        );
+
+        let mut members = Vec::<PopulationMember>::with_capacity(init_population.len());
+        let mut best_decoding = Array1::<Bit>::zeros(self.check_matrix.cols());
+        let mut best_posterior = prior_llr.clone();
+        let mut best_fitness = f64::NEG_INFINITY;
+        let mut generation_best_fitness = Vec::<f64>::new();
+        let mut generation_best_posteriors = Vec::<Array1<f64>>::new();
+        let mut generation_best_adjacent_variable_indices = Vec::<Vec<usize>>::new();
+        let mut generation_memory_strengths = Vec::<Array1<f64>>::new();
+        let mut gamma_history = Vec::<f64>::new();
+        let mut phase1_iterations = 0usize;
+        let mut phase1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
+
+        let mut dynamics_entries = Vec::<SLGMBPDynamicsEntry>::new();
+
+        for (member_index, init_llr) in init_population.iter().enumerate() {
+            let (decoding, posterior, iters, success, fitness) = match self.config.init_strategy {
+                InitStrategy::MinSum => {
+                    let (decoding, posterior, iters, success, cumsum_abs) =
+                        self.run_min_sum_phase(detectors, init_llr);
+                    let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
+                    let fitness = fitness_from_ms_cumsum(
+                        residual,
+                        cumsum_abs,
+                        self.config.fitness_alpha,
+                        self.config.fitness_beta,
+                    );
+                    (decoding, posterior, iters, success, fitness)
+                }
+                InitStrategy::MemBp => {
+                    let gamma_vec = Array1::from_elem(prior_llr.len(), self.config.init_gamma);
+                    let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                        detectors,
+                        &prior_llr,
+                        init_llr,
+                        &gamma_vec,
+                        self.config.t_ms,
+                    );
+                    let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
+                    let fitness = fitness_from_final_marginal(
+                        residual,
+                        &posterior,
+                        self.config.fitness_alpha,
+                        self.config.fitness_beta,
+                    );
+                    (decoding, posterior, iters, success, fitness)
+                }
+            };
+
+            let decoded_detectors = self.get_detectors(decoding.view());
+            let residual = residual_weight(&decoded_detectors, detectors);
+            let residual_checks = self.residual_check_indices(&decoded_detectors, detectors);
+            let (adjacent_indices, adjacent_llrs) =
+                self.residual_adjacent_llrs(&check_matrix_csr, &residual_checks, &posterior);
+            dynamics_entries.push(SLGMBPDynamicsEntry {
+                stage: "phase1".to_string(),
+                generation_index: 0,
+                member_index,
+                residual_syndrome_count: residual,
+                residual_adjacent_variable_count: adjacent_indices.len(),
+                score: fitness,
+                residual_adjacent_variable_indices: adjacent_indices,
+                residual_adjacent_variable_llrs: adjacent_llrs,
+                converged: success,
+                iteration_count: iters,
+                estimated_error_weight: self.estimated_error_weight(&decoding, &prior_llr),
+            });
+
+            phase1_iterations = phase1_iterations.max(iters);
+
+            if fitness > best_fitness {
+                best_fitness = fitness;
+                best_decoding = decoding.clone();
+                best_posterior = posterior.clone();
+            }
+
+            if success {
+                let solution_llr_cost = self.estimated_error_weight(&decoding, &prior_llr);
+                let replace = match phase1_success {
+                    None => true,
+                    Some((best_iter, best_llr_cost, _, _)) => {
+                        iters < best_iter || (iters == best_iter && solution_llr_cost < best_llr_cost)
+                    }
+                };
+                if replace {
+                    phase1_success = Some((
+                        iters,
+                        solution_llr_cost,
+                        decoding.clone(),
+                        posterior.clone(),
+                    ));
+                }
+                if iters == 1 {
+                    break;
+                }
+                continue;
+            }
+
+            members.push(PopulationMember {
+                posterior,
+                fitness,
+                perturbed_prior: init_llr.clone(),
+            });
+        }
+
+        if let Some((phase1_success_iters, _, phase1_decoding, phase1_posterior)) = phase1_success {
+            return DecodeResult {
+                decoding: phase1_decoding.clone(),
+                decoded_detectors: self.get_detectors(phase1_decoding.view()),
+                posterior_ratios: phase1_posterior,
+                success: true,
+                decoding_quality: self.get_decoding_quality(phase1_decoding.view()),
+                iterations: phase1_success_iters,
+                max_iter: self.max_iter(),
+                extra: BPExtraResult::SLGMBPTrace {
+                    phase1_converged: true,
+                    phase1_iterations: phase1_success_iters,
+                    total_iterations: phase1_success_iters,
+                    generation_count: 0,
+                    generation_best_fitness,
+                    selected_solution_posterior: None,
+                    residual_weight_history: Vec::new(),
+                    gamma_history,
+                    detailed_dynamics: Some(SLGMBPDetailedDynamicsTrace {
+                        observed_syndrome_weight,
+                        entries: dynamics_entries,
+                    }),
+                    score_spike_trace: None,
+                },
+            };
+        }
+
+        let mut total_iterations = phase1_iterations;
+        let mut residual_weight_history = Vec::<usize>::new();
+
+        for gen_idx in 0..self.config.g_max {
+            let children = build_next_generation(
+                &members,
+                self.config.elite_count,
+                self.config.sequential_mc,
+                self.config.mutation_rate,
+                self.config.mutation_llr_abs_threshold,
+                self.config.selection_mode,
+                self.config.weighted_selection_mode,
+                self.config.perturbation_method,
+                self.config.tournament_size,
+                &mut rng,
+            );
+
+            let generation_gamma = self.sample_generation_memory_strength(prior_llr.len(), &mut rng);
+            let gamma_mean = if generation_gamma.is_empty() {
+                0.0
+            } else {
+                generation_gamma.sum() / (generation_gamma.len() as f64)
+            };
+            gamma_history.push(gamma_mean);
+
+            let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
+            let mut gen_best = f64::NEG_INFINITY;
+            let mut generation_iterations = 0usize;
+            let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
+            let mut gen_best_member_fitness = f64::NEG_INFINITY;
+            let mut gen_best_member_posterior: Option<Array1<f64>> = None;
+            let mut gen_best_member_adjacent_indices = Vec::<usize>::new();
+
+            for (member_index, mut child) in children.into_iter().enumerate() {
+                let phase_prior = if self.config.continue_perturbation {
+                    if self.config.sequential_mc {
+                        child.perturbed_prior = sample_perturbed_llr(
+                            &prior_llr,
+                            self.config.init_perturbation_mode,
+                            self.config.sigma2,
+                            self.config.delta,
+                            &mut rng,
+                        );
+                        &child.perturbed_prior
+                    } else {
+                        if self.config.perturbation_method == PerturbationMethod::Resample {
+                            child.perturbed_prior = sample_perturbed_llr(
+                                &prior_llr,
+                                self.config.init_perturbation_mode,
+                                self.config.sigma2,
+                                self.config.delta,
+                                &mut rng,
+                            );
+                        }
+                        &child.perturbed_prior
+                    }
+                } else {
+                    &prior_llr
+                };
+
+                let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                    detectors,
+                    phase_prior,
+                    &child.posterior,
+                    &generation_gamma,
+                    self.config.t_mem,
+                );
+
+                let decoded_detectors = self.get_detectors(decoding.view());
+                let residual = residual_weight(&decoded_detectors, detectors);
+                residual_weight_history.push(residual);
+                let fitness = fitness_from_final_marginal(
+                    residual,
+                    &posterior,
+                    self.config.fitness_alpha,
+                    self.config.fitness_beta,
+                );
+                gen_best = gen_best.max(fitness);
+
+                let residual_checks = self.residual_check_indices(&decoded_detectors, detectors);
+                let (adjacent_indices, adjacent_llrs) =
+                    self.residual_adjacent_llrs(&check_matrix_csr, &residual_checks, &posterior);
+
+                if fitness > gen_best_member_fitness {
+                    gen_best_member_fitness = fitness;
+                    gen_best_member_posterior = Some(posterior.clone());
+                    gen_best_member_adjacent_indices = adjacent_indices.clone();
+                }
+
+                dynamics_entries.push(SLGMBPDynamicsEntry {
+                    stage: "generation".to_string(),
+                    generation_index: gen_idx,
+                    member_index,
+                    residual_syndrome_count: residual,
+                    residual_adjacent_variable_count: adjacent_indices.len(),
+                    score: fitness,
+                    residual_adjacent_variable_indices: adjacent_indices,
+                    residual_adjacent_variable_llrs: adjacent_llrs,
+                    converged: success,
+                    iteration_count: iters,
+                    estimated_error_weight: self.estimated_error_weight(&decoding, &prior_llr),
+                });
+
+                if fitness > best_fitness {
+                    best_fitness = fitness;
+                    best_decoding = decoding.clone();
+                    best_posterior = posterior.clone();
+                }
+
+                if success {
+                    let solution_llr_cost = self.estimated_error_weight(&decoding, &prior_llr);
+                    let replace = match generation_success {
+                        None => true,
+                        Some((best_iter, best_llr_cost, _, _)) => {
+                            iters < best_iter || (iters == best_iter && solution_llr_cost < best_llr_cost)
+                        }
+                    };
+                    if replace {
+                        generation_success = Some((
+                            iters,
+                            solution_llr_cost,
+                            decoding.clone(),
+                            posterior.clone(),
+                        ));
+                    }
+                    if iters == 1 {
+                        break;
+                    }
+                    continue;
+                }
+
+                generation_iterations = generation_iterations.max(iters);
+                next_members.push(PopulationMember {
+                    posterior,
+                    fitness,
+                    perturbed_prior: child.perturbed_prior,
+                });
+            }
+
+            if let Some((gen_success_iters, _, gen_success_decoding, gen_success_posterior)) = generation_success {
+                generation_best_fitness.push(gen_best);
+                generation_best_posteriors.push(
+                    gen_best_member_posterior.unwrap_or_else(|| gen_success_posterior.clone()),
+                );
+                generation_best_adjacent_variable_indices.push(gen_best_member_adjacent_indices);
+                generation_memory_strengths.push(generation_gamma.clone());
+                let score_spike_trace = self.build_score_spike_trace(
+                    &generation_best_fitness,
+                    &generation_best_posteriors,
+                    &generation_best_adjacent_variable_indices,
+                    &generation_memory_strengths,
+                    &gamma_history,
+                );
+                total_iterations += gen_success_iters;
+                let gen_decoded_detectors = self.get_detectors(gen_success_decoding.view());
+                return DecodeResult {
+                    decoding: gen_success_decoding.clone(),
+                    decoded_detectors: gen_decoded_detectors,
+                    posterior_ratios: gen_success_posterior.clone(),
+                    success: true,
+                    decoding_quality: self.get_decoding_quality(gen_success_decoding.view()),
+                    iterations: total_iterations,
+                    max_iter: self.max_iter(),
+                    extra: BPExtraResult::SLGMBPTrace {
+                        phase1_converged: false,
+                        phase1_iterations,
+                        total_iterations,
+                        generation_count: gamma_history.len(),
+                        generation_best_fitness,
+                        selected_solution_posterior: Some(gen_success_posterior),
+                        residual_weight_history,
+                        gamma_history,
+                        detailed_dynamics: Some(SLGMBPDetailedDynamicsTrace {
+                            observed_syndrome_weight,
+                            entries: dynamics_entries,
+                        }),
+                        score_spike_trace,
+                    },
+                };
+            }
+
+            total_iterations += generation_iterations;
+            generation_best_fitness.push(gen_best);
+            generation_best_posteriors
+                .push(gen_best_member_posterior.unwrap_or_else(|| best_posterior.clone()));
+            generation_best_adjacent_variable_indices.push(gen_best_member_adjacent_indices);
+            generation_memory_strengths.push(generation_gamma.clone());
+            members = next_members;
+        }
+
+        let score_spike_trace = self.build_score_spike_trace(
+            &generation_best_fitness,
+            &generation_best_posteriors,
+            &generation_best_adjacent_variable_indices,
+            &generation_memory_strengths,
+            &gamma_history,
+        );
+
+        DecodeResult {
+            decoding: best_decoding.clone(),
+            decoded_detectors: self.get_detectors(best_decoding.view()),
+            posterior_ratios: best_posterior.clone(),
+            success: false,
+            decoding_quality: self.get_decoding_quality(best_decoding.view()),
+            iterations: total_iterations,
+            max_iter: self.max_iter(),
+            extra: BPExtraResult::SLGMBPTrace {
+                phase1_converged: false,
+                phase1_iterations,
+                total_iterations,
+                generation_count: gamma_history.len(),
+                generation_best_fitness,
+                selected_solution_posterior: Some(best_posterior),
+                residual_weight_history,
+                gamma_history,
+                detailed_dynamics: Some(SLGMBPDetailedDynamicsTrace {
+                    observed_syndrome_weight,
+                    entries: dynamics_entries,
+                }),
+                score_spike_trace,
             },
         }
     }

@@ -417,9 +417,12 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         eta: float = 1.0,
         mutation_rate: float = 0.02,
         mutation_llr_abs_threshold: float = 0.25,
+        sequential_mc: bool = False,
         init_perturbation_mode: str = "gaussian",
         init_strategy: str = "min-sum",
         init_gamma: float = 0.125,
+        continue_perturbation: bool = False,
+        perturbation_method: str = "fixed",
         selection_mode: str = "weighted",
         weighted_selection_mode: str = "softmax",
         gamma_mode: str = "fixed",
@@ -446,9 +449,12 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         self.eta = eta
         self.mutation_rate = mutation_rate
         self.mutation_llr_abs_threshold = mutation_llr_abs_threshold
+        self.sequential_mc = sequential_mc
         self.init_perturbation_mode = init_perturbation_mode
         self.init_strategy = init_strategy
         self.init_gamma = init_gamma
+        self.continue_perturbation = continue_perturbation
+        self.perturbation_method = perturbation_method
         self.selection_mode = selection_mode
         self.weighted_selection_mode = weighted_selection_mode
         self.gamma_mode = gamma_mode
@@ -483,9 +489,12 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             eta=self.eta,
             mutation_rate=self.mutation_rate,
             mutation_llr_abs_threshold=self.mutation_llr_abs_threshold,
+            sequential_mc=self.sequential_mc,
             init_perturbation_mode=self.init_perturbation_mode,
             init_strategy=self.init_strategy,
             init_gamma=self.init_gamma,
+            continue_perturbation=self.continue_perturbation,
+            perturbation_method=self.perturbation_method,
             selection_mode=self.selection_mode,
             weighted_selection_mode=self.weighted_selection_mode,
             gamma_mode=self.gamma_mode,
@@ -588,9 +597,12 @@ def sinter_decoders(
         "eta",
         "mutation_rate",
         "mutation_llr_abs_threshold",
+        "sequential_mc",
         "init_perturbation_mode",
         "init_strategy",
         "init_gamma",
+        "continue_perturbation",
+        "perturbation_method",
         "selection_mode",
         "weighted_selection_mode",
         "gamma_mode",

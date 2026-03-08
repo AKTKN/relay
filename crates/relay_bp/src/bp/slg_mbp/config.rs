@@ -22,13 +22,19 @@ pub enum WeightedSelectionMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GammaMode {
     Fixed,
-    IntervalRandomPerGeneration,
+    IntervalRandomPerVariable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitStrategy {
     MinSum,
     MemBp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerturbationMethod {
+    Fixed,
+    Resample,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +51,7 @@ pub struct SLGMBPDecoderConfig {
     pub mutation_rate: f64,
     pub mutation_llr_abs_threshold: f64,
     pub elite_count: usize,
+    pub sequential_mc: bool,
     pub tournament_size: usize,
     pub selection_mode: SelectionMode,
     pub weighted_selection_mode: WeightedSelectionMode,
@@ -54,6 +61,8 @@ pub struct SLGMBPDecoderConfig {
     pub gamma_interval: (f64, f64),
     pub init_strategy: InitStrategy,
     pub init_gamma: f64,
+    pub continue_perturbation: bool,
+    pub perturbation_method: PerturbationMethod,
     pub seed: u64,
 }
 
@@ -72,6 +81,7 @@ impl Default for SLGMBPDecoderConfig {
             mutation_rate: 0.02,
             mutation_llr_abs_threshold: 0.25,
             elite_count: 2,
+            sequential_mc: false,
             tournament_size: 3,
             selection_mode: SelectionMode::Weighted,
             weighted_selection_mode: WeightedSelectionMode::Softmax,
@@ -81,6 +91,8 @@ impl Default for SLGMBPDecoderConfig {
             gamma_interval: (0.0, 0.25),
             init_strategy: InitStrategy::MinSum,
             init_gamma: 0.125,
+            continue_perturbation: false,
+            perturbation_method: PerturbationMethod::Fixed,
             seed: 0,
         }
     }

@@ -2,24 +2,28 @@ use ndarray::Array1;
 use rand::rngs::StdRng;
 use rand::Rng;
 
+use super::config::PerturbationMethod;
 use super::config::{SelectionMode, WeightedSelectionMode};
 
 #[derive(Clone)]
 pub struct PopulationMember {
     pub posterior: Array1<f64>,
     pub fitness: f64,
+    pub perturbed_prior: Array1<f64>,
 }
 
 pub fn build_next_generation(
     population: &[PopulationMember],
     elite_count: usize,
+    sequential_mc: bool,
     mutation_rate: f64,
     mutation_llr_abs_threshold: f64,
     selection_mode: SelectionMode,
     weighted_mode: WeightedSelectionMode,
+    perturbation_method: PerturbationMethod,
     tournament_size: usize,
     rng: &mut StdRng,
-) -> Vec<Array1<f64>> {
+) -> Vec<PopulationMember> {
     if population.is_empty() {
         return Vec::new();
     }
@@ -35,9 +39,13 @@ pub fn build_next_generation(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut children = Vec::<Array1<f64>>::with_capacity(m);
+    if sequential_mc {
+        return build_next_generation_sequential_mc(population, &ranked, elite_count, m, n);
+    }
+
+    let mut children = Vec::<PopulationMember>::with_capacity(m);
     for idx in ranked.into_iter().take(elite_count.min(m)) {
-        children.push(population[idx].posterior.clone());
+        children.push(population[idx].clone());
     }
 
     while children.len() < m {
@@ -60,7 +68,72 @@ pub fn build_next_generation(
             rng,
         );
 
-        children.push(child);
+        let inherited_prior = match perturbation_method {
+            PerturbationMethod::Fixed => {
+                if rng.gen_bool(0.5) {
+                    pa.perturbed_prior.clone()
+                } else {
+                    pb.perturbed_prior.clone()
+                }
+            }
+            // For resample mode, the next phase resamples before decoding.
+            PerturbationMethod::Resample => pa.perturbed_prior.clone(),
+        };
+
+        children.push(PopulationMember {
+            posterior: child,
+            fitness: 0.0,
+            perturbed_prior: inherited_prior,
+        });
+    }
+
+    children
+}
+
+fn build_next_generation_sequential_mc(
+    population: &[PopulationMember],
+    ranked: &[usize],
+    elite_count: usize,
+    m: usize,
+    n: usize,
+) -> Vec<PopulationMember> {
+    let elite_size = elite_count.min(m).max(1);
+    let elite_indices: Vec<usize> = ranked.iter().copied().take(elite_size).collect();
+
+    let mut children = Vec::<PopulationMember>::with_capacity(m);
+
+    for &idx in &elite_indices {
+        children.push(PopulationMember {
+            // Sequential MC only carries the marginal (posterior) forward.
+            posterior: population[idx].posterior.clone(),
+            fitness: 0.0,
+            perturbed_prior: Array1::<f64>::zeros(n),
+        });
+    }
+
+    let remaining = m.saturating_sub(children.len());
+    if remaining == 0 {
+        return children;
+    }
+
+    let base = remaining / elite_indices.len();
+    let extra = remaining % elite_indices.len();
+
+    for (rank_pos, &idx) in elite_indices.iter().enumerate() {
+        let copies = base + usize::from(rank_pos < extra);
+        for _ in 0..copies {
+            if children.len() >= m {
+                break;
+            }
+            children.push(PopulationMember {
+                posterior: population[idx].posterior.clone(),
+                fitness: 0.0,
+                perturbed_prior: Array1::<f64>::zeros(n),
+            });
+        }
+        if children.len() >= m {
+            break;
+        }
     }
 
     children

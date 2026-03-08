@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    GammaMode, InitPerturbationMode, InitStrategy, SLGMBPDecoderConfig, SelectionMode,
-    WeightedSelectionMode,
+    GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
 use relay_bp::decoder::Bit;
@@ -38,12 +38,15 @@ impl SLGMBPDecoderF64 {
         mutation_rate=0.02,
         mutation_llr_abs_threshold=0.25,
         elite_count=2,
+        sequential_mc=false,
         tournament_size=3,
         init_perturbation_mode="gaussian".to_string(),
         selection_mode="weighted".to_string(),
         weighted_selection_mode="softmax".to_string(),
         init_strategy="min-sum".to_string(),
         init_gamma=0.125,
+        continue_perturbation=false,
+        perturbation_method="fixed".to_string(),
         gamma_mode="fixed".to_string(),
         gamma_fixed=0.125,
         gamma_interval=(0.0, 0.25),
@@ -70,12 +73,15 @@ impl SLGMBPDecoderF64 {
         mutation_rate: f64,
         mutation_llr_abs_threshold: f64,
         elite_count: usize,
+        sequential_mc: bool,
         tournament_size: usize,
         init_perturbation_mode: String,
         selection_mode: String,
         weighted_selection_mode: String,
         init_strategy: String,
         init_gamma: f64,
+        continue_perturbation: bool,
+        perturbation_method: String,
         gamma_mode: String,
         gamma_fixed: f64,
         gamma_interval: (f64, f64),
@@ -117,9 +123,17 @@ impl SLGMBPDecoderF64 {
             _ => InitStrategy::MinSum,
         };
 
+        let perturbation_method = match perturbation_method.to_ascii_lowercase().as_str() {
+            "resample" => PerturbationMethod::Resample,
+            _ => PerturbationMethod::Fixed,
+        };
+
         let gamma_mode = match gamma_mode.to_ascii_lowercase().as_str() {
-            "interval_random" | "interval_random_per_generation" | "random_interval" => {
-                GammaMode::IntervalRandomPerGeneration
+            "interval_random"
+            | "interval_random_per_generation"
+            | "interval_random_per_variable"
+            | "random_interval" => {
+                GammaMode::IntervalRandomPerVariable
             }
             _ => GammaMode::Fixed,
         };
@@ -137,12 +151,15 @@ impl SLGMBPDecoderF64 {
             mutation_rate,
             mutation_llr_abs_threshold,
             elite_count,
+            sequential_mc,
             tournament_size,
             selection_mode,
             weighted_selection_mode: weighted_mode,
             init_perturbation_mode: init_mode,
             init_strategy,
             init_gamma,
+            continue_perturbation,
+            perturbation_method,
             gamma_mode,
             gamma_fixed,
             gamma_interval,
@@ -175,6 +192,18 @@ impl SLGMBPDecoderF64 {
         detectors: PyReadonlyArray1<'_, Bit>,
     ) -> DecodeResult {
         DecodeResult::new(self_.as_super().inner().decode_detailed(detectors.as_array()))
+    }
+
+    pub fn decode_detailed_dynamics(
+        mut self_: PyRefMut<'_, Self>,
+        detectors: PyReadonlyArray1<'_, Bit>,
+    ) -> DecodeResult {
+        DecodeResult::new(
+            self_
+                .as_super()
+                .inner()
+                .decode_detailed_dynamics(detectors.as_array()),
+        )
     }
 
     pub fn decode_batch<'py>(
