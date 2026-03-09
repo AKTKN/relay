@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
-    SelectionMode, WeightedSelectionMode,
+    AdaptiveMemoryMode, GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod,
+    SLGMBPDecoderConfig, SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
 use relay_bp::decoder::Bit;
@@ -34,6 +34,8 @@ impl SLGMBPDecoderF64 {
         delta=0.2,
         fitness_alpha=1000.0,
         fitness_beta=1.0,
+        fitness_low_llr_mu=0.0,
+        fitness_low_llr_threshold=0.0,
         eta=1.0,
         mutation_rate=0.02,
         mutation_llr_abs_threshold=0.25,
@@ -45,11 +47,19 @@ impl SLGMBPDecoderF64 {
         weighted_selection_mode="softmax".to_string(),
         init_strategy="min-sum".to_string(),
         init_gamma=0.125,
+        adaptive_perturbation=false,
+        adaptive_perturbation_llr_threshold=0.0,
+        adaptive_perturbation_factor=1.0,
         continue_perturbation=false,
         perturbation_method="fixed".to_string(),
+        reset_marginal=false,
         gamma_mode="fixed".to_string(),
         gamma_fixed=0.125,
         gamma_interval=(0.0, 0.25),
+        adaptive_memory=false,
+        adaptive_memory_zeta=1.0,
+        adaptive_memory_adjacent_gamma_interval=(0.0, 0.25),
+        adaptive_memory_mode="probabilistic_flip".to_string(),
         seed=0
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -69,6 +79,8 @@ impl SLGMBPDecoderF64 {
         delta: f64,
         fitness_alpha: f64,
         fitness_beta: f64,
+        fitness_low_llr_mu: f64,
+        fitness_low_llr_threshold: f64,
         eta: f64,
         mutation_rate: f64,
         mutation_llr_abs_threshold: f64,
@@ -80,11 +92,19 @@ impl SLGMBPDecoderF64 {
         weighted_selection_mode: String,
         init_strategy: String,
         init_gamma: f64,
+        adaptive_perturbation: bool,
+        adaptive_perturbation_llr_threshold: f64,
+        adaptive_perturbation_factor: f64,
         continue_perturbation: bool,
         perturbation_method: String,
+        reset_marginal: bool,
         gamma_mode: String,
         gamma_fixed: f64,
         gamma_interval: (f64, f64),
+        adaptive_memory: bool,
+        adaptive_memory_zeta: f64,
+        adaptive_memory_adjacent_gamma_interval: (f64, f64),
+        adaptive_memory_mode: String,
         seed: u64,
     ) -> PyResult<(Self, DynDecoder)> {
         let decoder = Self {};
@@ -138,6 +158,13 @@ impl SLGMBPDecoderF64 {
             _ => GammaMode::Fixed,
         };
 
+        let adaptive_memory_mode = match adaptive_memory_mode.to_ascii_lowercase().as_str() {
+            "direct_interval" | "uniform_interval" | "raw_interval" => {
+                AdaptiveMemoryMode::DirectInterval
+            }
+            _ => AdaptiveMemoryMode::ProbabilisticFlip,
+        };
+
         let cfg = SLGMBPDecoderConfig {
             ensemble_size,
             t_ms,
@@ -147,6 +174,8 @@ impl SLGMBPDecoderF64 {
             delta,
             fitness_alpha,
             fitness_beta,
+            fitness_low_llr_mu,
+            fitness_low_llr_threshold,
             eta,
             mutation_rate,
             mutation_llr_abs_threshold,
@@ -158,11 +187,19 @@ impl SLGMBPDecoderF64 {
             init_perturbation_mode: init_mode,
             init_strategy,
             init_gamma,
+            adaptive_perturbation,
+            adaptive_perturbation_llr_threshold,
+            adaptive_perturbation_factor,
             continue_perturbation,
             perturbation_method,
+            reset_marginal,
             gamma_mode,
             gamma_fixed,
             gamma_interval,
+            adaptive_memory,
+            adaptive_memory_zeta,
+            adaptive_memory_adjacent_gamma_interval,
+            adaptive_memory_mode,
             seed,
         };
 

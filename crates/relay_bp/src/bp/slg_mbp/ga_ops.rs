@@ -1,15 +1,18 @@
 use ndarray::Array1;
 use rand::rngs::StdRng;
 use rand::Rng;
+use std::collections::BTreeSet;
 
 use super::config::PerturbationMethod;
 use super::config::{SelectionMode, WeightedSelectionMode};
+use super::init_population::PerturbationState;
 
 #[derive(Clone)]
 pub struct PopulationMember {
     pub posterior: Array1<f64>,
     pub fitness: f64,
-    pub perturbed_prior: Array1<f64>,
+    pub perturbation_state: PerturbationState,
+    pub residual_adjacent_variable_indices: Vec<usize>,
 }
 
 pub fn build_next_generation(
@@ -68,22 +71,31 @@ pub fn build_next_generation(
             rng,
         );
 
-        let inherited_prior = match perturbation_method {
+        let inherited_perturbation_state = match perturbation_method {
             PerturbationMethod::Fixed => {
                 if rng.gen_bool(0.5) {
-                    pa.perturbed_prior.clone()
+                    pa.perturbation_state.clone()
                 } else {
-                    pb.perturbed_prior.clone()
+                    pb.perturbation_state.clone()
                 }
             }
             // For resample mode, the next phase resamples before decoding.
-            PerturbationMethod::Resample => pa.perturbed_prior.clone(),
+            PerturbationMethod::Resample => PerturbationState::None,
         };
+
+        let mut inherited_adjacent = BTreeSet::<usize>::new();
+        for &idx in &pa.residual_adjacent_variable_indices {
+            inherited_adjacent.insert(idx);
+        }
+        for &idx in &pb.residual_adjacent_variable_indices {
+            inherited_adjacent.insert(idx);
+        }
 
         children.push(PopulationMember {
             posterior: child,
             fitness: 0.0,
-            perturbed_prior: inherited_prior,
+            perturbation_state: inherited_perturbation_state,
+            residual_adjacent_variable_indices: inherited_adjacent.into_iter().collect(),
         });
     }
 
@@ -95,7 +107,7 @@ fn build_next_generation_sequential_mc(
     ranked: &[usize],
     elite_count: usize,
     m: usize,
-    n: usize,
+    _n: usize,
 ) -> Vec<PopulationMember> {
     let elite_size = elite_count.min(m).max(1);
     let elite_indices: Vec<usize> = ranked.iter().copied().take(elite_size).collect();
@@ -107,7 +119,10 @@ fn build_next_generation_sequential_mc(
             // Sequential MC only carries the marginal (posterior) forward.
             posterior: population[idx].posterior.clone(),
             fitness: 0.0,
-            perturbed_prior: Array1::<f64>::zeros(n),
+            perturbation_state: PerturbationState::None,
+            residual_adjacent_variable_indices: population[idx]
+                .residual_adjacent_variable_indices
+                .clone(),
         });
     }
 
@@ -128,7 +143,10 @@ fn build_next_generation_sequential_mc(
             children.push(PopulationMember {
                 posterior: population[idx].posterior.clone(),
                 fitness: 0.0,
-                perturbed_prior: Array1::<f64>::zeros(n),
+                perturbation_state: PerturbationState::None,
+                residual_adjacent_variable_indices: population[idx]
+                    .residual_adjacent_variable_indices
+                    .clone(),
             });
         }
         if children.len() >= m {

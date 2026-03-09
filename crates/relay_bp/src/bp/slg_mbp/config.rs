@@ -26,6 +26,12 @@ pub enum GammaMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveMemoryMode {
+    ProbabilisticFlip,
+    DirectInterval,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitStrategy {
     MinSum,
     MemBp,
@@ -47,6 +53,8 @@ pub struct SLGMBPDecoderConfig {
     pub delta: f64,
     pub fitness_alpha: f64,
     pub fitness_beta: f64,
+    pub fitness_low_llr_mu: f64,
+    pub fitness_low_llr_threshold: f64,
     pub eta: f64,
     pub mutation_rate: f64,
     pub mutation_llr_abs_threshold: f64,
@@ -59,10 +67,18 @@ pub struct SLGMBPDecoderConfig {
     pub gamma_mode: GammaMode,
     pub gamma_fixed: f64,
     pub gamma_interval: (f64, f64),
+    pub adaptive_memory: bool,
+    pub adaptive_memory_zeta: f64,
+    pub adaptive_memory_adjacent_gamma_interval: (f64, f64),
+    pub adaptive_memory_mode: AdaptiveMemoryMode,
     pub init_strategy: InitStrategy,
     pub init_gamma: f64,
+    pub adaptive_perturbation: bool,
+    pub adaptive_perturbation_llr_threshold: f64,
+    pub adaptive_perturbation_factor: f64,
     pub continue_perturbation: bool,
     pub perturbation_method: PerturbationMethod,
+    pub reset_marginal: bool,
     pub seed: u64,
 }
 
@@ -77,6 +93,8 @@ impl Default for SLGMBPDecoderConfig {
             delta: 0.2,
             fitness_alpha: 1000.0,
             fitness_beta: 1.0,
+            fitness_low_llr_mu: 0.0,
+            fitness_low_llr_threshold: 0.0,
             eta: 1.0,
             mutation_rate: 0.02,
             mutation_llr_abs_threshold: 0.25,
@@ -89,10 +107,18 @@ impl Default for SLGMBPDecoderConfig {
             gamma_mode: GammaMode::Fixed,
             gamma_fixed: 0.125,
             gamma_interval: (0.0, 0.25),
+            adaptive_memory: false,
+            adaptive_memory_zeta: 1.0,
+            adaptive_memory_adjacent_gamma_interval: (0.0, 0.25),
+            adaptive_memory_mode: AdaptiveMemoryMode::ProbabilisticFlip,
             init_strategy: InitStrategy::MinSum,
             init_gamma: 0.125,
+            adaptive_perturbation: false,
+            adaptive_perturbation_llr_threshold: 0.0,
+            adaptive_perturbation_factor: 1.0,
             continue_perturbation: false,
             perturbation_method: PerturbationMethod::Fixed,
+            reset_marginal: false,
             seed: 0,
         }
     }
