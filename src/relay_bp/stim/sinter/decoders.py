@@ -426,6 +426,7 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         adaptive_perturbation: bool = False,
         adaptive_perturbation_llr_threshold: float = 0.0,
         adaptive_perturbation_factor: float = 1.0,
+        adaptive_perturbation_sign_mode: str = "random",
         continue_perturbation: bool = False,
         perturbation_method: str = "fixed",
         reset_marginal: bool = False,
@@ -468,6 +469,7 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         self.adaptive_perturbation = adaptive_perturbation
         self.adaptive_perturbation_llr_threshold = adaptive_perturbation_llr_threshold
         self.adaptive_perturbation_factor = adaptive_perturbation_factor
+        self.adaptive_perturbation_sign_mode = adaptive_perturbation_sign_mode
         self.continue_perturbation = continue_perturbation
         self.perturbation_method = perturbation_method
         self.reset_marginal = reset_marginal
@@ -520,6 +522,7 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             adaptive_perturbation=self.adaptive_perturbation,
             adaptive_perturbation_llr_threshold=self.adaptive_perturbation_llr_threshold,
             adaptive_perturbation_factor=self.adaptive_perturbation_factor,
+            adaptive_perturbation_sign_mode=self.adaptive_perturbation_sign_mode,
             continue_perturbation=self.continue_perturbation,
             perturbation_method=self.perturbation_method,
             reset_marginal=self.reset_marginal,

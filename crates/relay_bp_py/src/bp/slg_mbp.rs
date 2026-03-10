@@ -6,8 +6,9 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    AdaptiveMemoryMode, GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod,
-    SLGMBPDecoderConfig, SelectionMode, WeightedSelectionMode,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, GammaMode, InitPerturbationMode,
+    InitStrategy, PerturbationMethod, SLGMBPDecoderConfig, SelectionMode,
+    WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
 use relay_bp::decoder::Bit;
@@ -50,6 +51,7 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation=false,
         adaptive_perturbation_llr_threshold=0.0,
         adaptive_perturbation_factor=1.0,
+        adaptive_perturbation_sign_mode="random".to_string(),
         continue_perturbation=false,
         perturbation_method="fixed".to_string(),
         reset_marginal=false,
@@ -95,6 +97,7 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation: bool,
         adaptive_perturbation_llr_threshold: f64,
         adaptive_perturbation_factor: f64,
+        adaptive_perturbation_sign_mode: String,
         continue_perturbation: bool,
         perturbation_method: String,
         reset_marginal: bool,
@@ -165,6 +168,14 @@ impl SLGMBPDecoderF64 {
             _ => AdaptiveMemoryMode::ProbabilisticFlip,
         };
 
+        let adaptive_perturbation_sign_mode =
+            match adaptive_perturbation_sign_mode.to_ascii_lowercase().as_str() {
+                "always_negative" | "negative" | "all_negative" => {
+                    AdaptivePerturbationSignMode::AlwaysNegative
+                }
+                _ => AdaptivePerturbationSignMode::Random,
+            };
+
         let cfg = SLGMBPDecoderConfig {
             ensemble_size,
             t_ms,
@@ -190,6 +201,7 @@ impl SLGMBPDecoderF64 {
             adaptive_perturbation,
             adaptive_perturbation_llr_threshold,
             adaptive_perturbation_factor,
+            adaptive_perturbation_sign_mode,
             continue_perturbation,
             perturbation_method,
             reset_marginal,

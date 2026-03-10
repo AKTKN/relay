@@ -14,7 +14,8 @@ pub mod init_population;
 pub mod trace;
 
 use config::{
-    AdaptiveMemoryMode, GammaMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, GammaMode, InitStrategy,
+    PerturbationMethod, SLGMBPDecoderConfig,
 };
 use evaluate::{fitness_from_final_marginal, fitness_from_ms_cumsum, residual_weight};
 use ga_ops::{build_next_generation, PopulationMember};
@@ -167,10 +168,19 @@ impl SLGMBPDecoder {
         }
 
         let threshold = self.config.adaptive_perturbation_llr_threshold.abs();
-        let factor = self.config.adaptive_perturbation_factor;
+        let add_val = self.config.adaptive_perturbation_factor.ln();
+        
+        let mut rng = rand::thread_rng();
+
         Array1::from_iter(base_prior_llr.iter().zip(posterior.iter()).map(|(&prior, &llr)| {
             if llr.abs() < threshold {
-                prior * factor
+                let sign = match self.config.adaptive_perturbation_sign_mode {
+                    AdaptivePerturbationSignMode::Random => {
+                        if rng.gen_bool(0.5) { 1.0 } else { -1.0 }
+                    }
+                    AdaptivePerturbationSignMode::AlwaysNegative => -1.0,
+                };
+                prior + (sign * add_val)
             } else {
                 prior
             }
@@ -1113,7 +1123,9 @@ impl DecoderRunner for SLGMBPDecoder {}
 mod tests {
     use super::SLGMBPDecoder;
     use crate::bp::min_sum::MinSumDecoderConfig;
-    use crate::bp::slg_mbp::config::SLGMBPDecoderConfig;
+    use crate::bp::slg_mbp::config::{
+        AdaptivePerturbationSignMode, SLGMBPDecoderConfig,
+    };
     use crate::bipartite_graph::BipartiteGraph;
     use crate::decoder::SparseBitMatrix;
     use ndarray::array;
@@ -1145,6 +1157,7 @@ mod tests {
             adaptive_perturbation: true,
             adaptive_perturbation_llr_threshold: 0.25,
             adaptive_perturbation_factor: 3.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::AlwaysNegative,
             ..SLGMBPDecoderConfig::default()
         };
         let decoder = make_decoder(config);
@@ -1153,7 +1166,8 @@ mod tests {
 
         let rebased = decoder.build_adaptive_prior(&base_prior, &posterior);
 
-        assert_eq!(rebased, array![3.0, -2.0, 2.25]);
+        let add_val = 3.0_f64.ln();
+        assert_eq!(rebased, array![1.0 - add_val, -2.0, 0.75 - add_val]);
     }
 
     #[test]

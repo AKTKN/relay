@@ -43,6 +43,12 @@ pub enum PerturbationMethod {
     Resample,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptivePerturbationSignMode {
+    Random,
+    AlwaysNegative,
+}
+
 #[derive(Clone, Debug)]
 pub struct SLGMBPDecoderConfig {
     pub ensemble_size: usize,
@@ -76,6 +82,7 @@ pub struct SLGMBPDecoderConfig {
     pub adaptive_perturbation: bool,
     pub adaptive_perturbation_llr_threshold: f64,
     pub adaptive_perturbation_factor: f64,
+    pub adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode,
     pub continue_perturbation: bool,
     pub perturbation_method: PerturbationMethod,
     pub reset_marginal: bool,
@@ -116,6 +123,7 @@ impl Default for SLGMBPDecoderConfig {
             adaptive_perturbation: false,
             adaptive_perturbation_llr_threshold: 0.0,
             adaptive_perturbation_factor: 1.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::Random,
             continue_perturbation: false,
             perturbation_method: PerturbationMethod::Fixed,
             reset_marginal: false,
