@@ -60,7 +60,11 @@ macro_rules! create_bp_interface {
                     data_scale_value,
                     max_data_value,
                     int_bits: None,
-                    frac_bits: None
+                    frac_bits: None,
+                    enable_variable_message_drop: false,
+                    drop_probability: 0.0,
+                    drop_llr_threshold: 0.0,
+                    rng_seed: None,
                 };
 
                 let stopping_criterion = match stopping_criterion.as_str() {

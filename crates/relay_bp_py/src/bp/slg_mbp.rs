@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    AdaptiveMemoryMode, AdaptivePerturbationSignMode, GammaMode, InitPerturbationMode,
-    InitStrategy, PerturbationMethod, SLGMBPDecoderConfig, SelectionMode,
-    WeightedSelectionMode,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
+    GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
 use relay_bp::decoder::Bit;
@@ -49,12 +50,19 @@ impl SLGMBPDecoderF64 {
         init_strategy="min-sum".to_string(),
         init_gamma=0.125,
         adaptive_perturbation=false,
+        adaptive_perturbation_llr_threshold_mode="constant".to_string(),
         adaptive_perturbation_llr_threshold=0.0,
+        adaptive_perturbation_llr_threshold_min=0.0,
+        adaptive_perturbation_llr_threshold_max=0.0,
+        adaptive_perturbation_llr_threshold_factor=0.0,
         adaptive_perturbation_factor=1.0,
         adaptive_perturbation_sign_mode="random".to_string(),
+        adaptive_perturbation_positive_sign_prob=0.5,
         continue_perturbation=false,
         perturbation_method="fixed".to_string(),
         reset_marginal=false,
+        drop_p=0.0,
+        drop_llr_threshold=0.0,
         gamma_mode="fixed".to_string(),
         gamma_fixed=0.125,
         gamma_interval=(0.0, 0.25),
@@ -95,12 +103,19 @@ impl SLGMBPDecoderF64 {
         init_strategy: String,
         init_gamma: f64,
         adaptive_perturbation: bool,
+        adaptive_perturbation_llr_threshold_mode: String,
         adaptive_perturbation_llr_threshold: f64,
+        adaptive_perturbation_llr_threshold_min: f64,
+        adaptive_perturbation_llr_threshold_max: f64,
+        adaptive_perturbation_llr_threshold_factor: f64,
         adaptive_perturbation_factor: f64,
         adaptive_perturbation_sign_mode: String,
+        adaptive_perturbation_positive_sign_prob: f64,
         continue_perturbation: bool,
         perturbation_method: String,
         reset_marginal: bool,
+        drop_p: f64,
+        drop_llr_threshold: f64,
         gamma_mode: String,
         gamma_fixed: f64,
         gamma_interval: (f64, f64),
@@ -122,6 +137,10 @@ impl SLGMBPDecoderF64 {
             max_data_value,
             int_bits: None,
             frac_bits: None,
+            enable_variable_message_drop: false,
+            drop_probability: 0.0,
+            drop_llr_threshold: 0.0,
+            rng_seed: None,
         };
 
         let init_mode = match init_perturbation_mode.to_ascii_lowercase().as_str() {
@@ -176,6 +195,23 @@ impl SLGMBPDecoderF64 {
                 _ => AdaptivePerturbationSignMode::Random,
             };
 
+        let adaptive_perturbation_llr_threshold_mode =
+            match adaptive_perturbation_llr_threshold_mode
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "generation_log10_iter" | "generation_log10" | "log10_iter" | "dynamic" => {
+                    AdaptivePerturbationThresholdMode::GenerationLog10Iter
+                }
+                _ => AdaptivePerturbationThresholdMode::Constant,
+            };
+
+        if !(0.0..=1.0).contains(&adaptive_perturbation_positive_sign_prob) {
+            return Err(PyValueError::new_err(
+                "adaptive_perturbation_positive_sign_prob must be between 0.0 and 1.0",
+            ));
+        }
+
         let cfg = SLGMBPDecoderConfig {
             ensemble_size,
             t_ms,
@@ -199,12 +235,19 @@ impl SLGMBPDecoderF64 {
             init_strategy,
             init_gamma,
             adaptive_perturbation,
+            adaptive_perturbation_llr_threshold_mode,
             adaptive_perturbation_llr_threshold,
+            adaptive_perturbation_llr_threshold_min,
+            adaptive_perturbation_llr_threshold_max,
+            adaptive_perturbation_llr_threshold_factor,
             adaptive_perturbation_factor,
             adaptive_perturbation_sign_mode,
+            adaptive_perturbation_positive_sign_prob,
             continue_perturbation,
             perturbation_method,
             reset_marginal,
+            drop_p,
+            drop_llr_threshold,
             gamma_mode,
             gamma_fixed,
             gamma_interval,

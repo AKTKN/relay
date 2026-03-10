@@ -14,8 +14,8 @@ pub mod init_population;
 pub mod trace;
 
 use config::{
-    AdaptiveMemoryMode, AdaptivePerturbationSignMode, GammaMode, InitStrategy,
-    PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
+    GammaMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
 };
 use evaluate::{fitness_from_final_marginal, fitness_from_ms_cumsum, residual_weight};
 use ga_ops::{build_next_generation, PopulationMember};
@@ -56,11 +56,15 @@ impl SLGMBPDecoder {
         &self,
         detectors: ArrayView1<'_, Bit>,
         init_llr: &Array1<f64>,
+        drop_seed: Option<u64>,
     ) -> (Array1<Bit>, Array1<f64>, usize, bool, f64) {
         let priors_prob = self.base_min_sum_config.error_priors.clone();
-        let cfg = self
-            .config
-            .min_sum_template_from_priors(priors_prob, self.config.t_ms);
+        let cfg = self.config.min_sum_template_from_priors(
+            priors_prob,
+            self.config.t_ms,
+            false,
+            drop_seed,
+        );
 
         let mut decoder = MinSumBPDecoder::<f64>::new(self.check_matrix.clone(), Arc::new(cfg));
 
@@ -103,11 +107,16 @@ impl SLGMBPDecoder {
         gamma_per_variable: &Array1<f64>,
         max_iter: usize,
         reset_marginal: bool,
+        enable_variable_message_drop: bool,
+        drop_seed: Option<u64>,
     ) -> (Array1<Bit>, Array1<f64>, usize, bool) {
         let priors_prob = self.base_min_sum_config.error_priors.clone();
-        let cfg = self
-            .config
-            .min_sum_template_from_priors(priors_prob, max_iter);
+        let cfg = self.config.min_sum_template_from_priors(
+            priors_prob,
+            max_iter,
+            enable_variable_message_drop,
+            drop_seed,
+        );
         let mut decoder = MinSumBPDecoder::<f64>::new(self.check_matrix.clone(), Arc::new(cfg));
 
         let mut prev_marginal = self.initial_marginal(prior_llr, child_llr, reset_marginal);
@@ -158,16 +167,61 @@ impl SLGMBPDecoder {
         }
     }
 
+    fn adaptive_perturbation_llr_threshold_bounds(&self) -> (f64, f64) {
+        let lo = self
+            .config
+            .adaptive_perturbation_llr_threshold_min
+            .abs()
+            .min(self.config.adaptive_perturbation_llr_threshold_max.abs());
+        let hi = self
+            .config
+            .adaptive_perturbation_llr_threshold_min
+            .abs()
+            .max(self.config.adaptive_perturbation_llr_threshold_max.abs());
+        (lo, hi)
+    }
+
+    fn initial_adaptive_perturbation_llr_threshold(&self) -> f64 {
+        match self.config.adaptive_perturbation_llr_threshold_mode {
+            AdaptivePerturbationThresholdMode::Constant => {
+                self.config.adaptive_perturbation_llr_threshold.abs()
+            }
+            AdaptivePerturbationThresholdMode::GenerationLog10Iter => {
+                let (lo, _) = self.adaptive_perturbation_llr_threshold_bounds();
+                lo
+            }
+        }
+    }
+
+    fn next_adaptive_perturbation_llr_threshold(
+        &self,
+        current_threshold: f64,
+        generation_iters: usize,
+    ) -> f64 {
+        match self.config.adaptive_perturbation_llr_threshold_mode {
+            AdaptivePerturbationThresholdMode::Constant => {
+                self.config.adaptive_perturbation_llr_threshold.abs()
+            }
+            AdaptivePerturbationThresholdMode::GenerationLog10Iter => {
+                let (lo, hi) = self.adaptive_perturbation_llr_threshold_bounds();
+                let increment = self.config.adaptive_perturbation_llr_threshold_factor
+                    * (generation_iters.max(1) as f64).log10();
+                (current_threshold.clamp(lo, hi) + increment).clamp(lo, hi)
+            }
+        }
+    }
+
     fn build_adaptive_prior(
         &self,
         base_prior_llr: &Array1<f64>,
         posterior: &Array1<f64>,
+        adaptive_perturbation_llr_threshold: f64,
     ) -> Array1<f64> {
         if !self.config.adaptive_perturbation {
             return base_prior_llr.clone();
         }
 
-        let threshold = self.config.adaptive_perturbation_llr_threshold.abs();
+        let threshold = adaptive_perturbation_llr_threshold.abs();
         let add_val = self.config.adaptive_perturbation_factor.ln();
         
         let mut rng = rand::thread_rng();
@@ -176,7 +230,11 @@ impl SLGMBPDecoder {
             if llr.abs() < threshold {
                 let sign = match self.config.adaptive_perturbation_sign_mode {
                     AdaptivePerturbationSignMode::Random => {
-                        if rng.gen_bool(0.5) { 1.0 } else { -1.0 }
+                        if rng.gen_bool(self.config.adaptive_perturbation_positive_sign_prob) {
+                            1.0
+                        } else {
+                            -1.0
+                        }
                     }
                     AdaptivePerturbationSignMode::AlwaysNegative => -1.0,
                 };
@@ -192,8 +250,13 @@ impl SLGMBPDecoder {
         base_prior_llr: &Array1<f64>,
         child: &mut PopulationMember,
         rng: &mut StdRng,
+        adaptive_perturbation_llr_threshold: f64,
     ) -> Array1<f64> {
-        let adaptive_prior = self.build_adaptive_prior(base_prior_llr, &child.posterior);
+        let adaptive_prior = self.build_adaptive_prior(
+            base_prior_llr,
+            &child.posterior,
+            adaptive_perturbation_llr_threshold,
+        );
         if !self.config.continue_perturbation {
             return adaptive_prior;
         }
@@ -294,6 +357,14 @@ impl SLGMBPDecoder {
         }
 
         gamma
+    }
+
+    fn next_drop_seed(&self, rng: &mut StdRng) -> Option<u64> {
+        if self.config.drop_p > 0.0 {
+            Some(rng.gen())
+        } else {
+            None
+        }
     }
 
     fn max_iter(&self) -> usize {
@@ -456,6 +527,8 @@ impl Decoder for SLGMBPDecoder {
         let mut generation_best_fitness = Vec::<f64>::new();
         let mut gamma_history = Vec::<f64>::new();
         let mut phase1_iterations = 0usize;
+        let mut adaptive_perturbation_llr_threshold =
+            self.initial_adaptive_perturbation_llr_threshold();
         // Store (iters, llr_cost, decoding, posterior) for tie-breaking.
         // For equal iteration counts, prefer the solution with smaller sum(bit_i * prior_llr_i).
         let mut phase1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
@@ -464,7 +537,7 @@ impl Decoder for SLGMBPDecoder {
             let (decoding, posterior, iters, success, fitness) = match self.config.init_strategy {
                 InitStrategy::MinSum => {
                     let (decoding, posterior, iters, success, cumsum_abs) =
-                        self.run_min_sum_phase(detectors, init_llr);
+                        self.run_min_sum_phase(detectors, init_llr, None);
                     let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
                     let fitness = fitness_from_ms_cumsum(
                         residual,
@@ -486,6 +559,8 @@ impl Decoder for SLGMBPDecoder {
                         &gamma_vec,
                         self.config.t_ms,
                         false,
+                        false,
+                        None,
                     );
                     let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
                     let fitness = fitness_from_final_marginal(
@@ -590,13 +665,19 @@ impl Decoder for SLGMBPDecoder {
             let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
             let mut gen_best = f64::NEG_INFINITY;
             let mut generation_iterations = 0usize;
+            let mut generation_max_iters = 0usize;
             // Store (iters, llr_cost, decoding, posterior) for tie-breaking.
             let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
             let mut gen_best_member_fitness = f64::NEG_INFINITY;
             let mut gen_best_gamma: Option<Array1<f64>> = None;
 
             for mut child in children {
-                let phase_prior = self.build_generation_phase_prior(&prior_llr, &mut child, &mut rng);
+                let phase_prior = self.build_generation_phase_prior(
+                    &prior_llr,
+                    &mut child,
+                    &mut rng,
+                    adaptive_perturbation_llr_threshold,
+                );
 
                 let member_gamma = self.sample_member_memory_strength(
                     &child.posterior,
@@ -611,6 +692,8 @@ impl Decoder for SLGMBPDecoder {
                     &member_gamma,
                     self.config.t_mem,
                     self.config.reset_marginal,
+                    self.config.drop_p > 0.0,
+                    self.next_drop_seed(&mut rng),
                 );
 
                 let decoded_detectors = self.get_detectors(decoding.view());
@@ -636,6 +719,8 @@ impl Decoder for SLGMBPDecoder {
                     gen_best_member_fitness = fitness;
                     gen_best_gamma = Some(member_gamma.clone());
                 }
+
+                generation_max_iters = generation_max_iters.max(iters);
 
                 if success {
                     let solution_llr_cost = decoding
@@ -714,6 +799,10 @@ impl Decoder for SLGMBPDecoder {
 
             total_iterations += generation_iterations;
             generation_best_fitness.push(gen_best);
+            adaptive_perturbation_llr_threshold = self.next_adaptive_perturbation_llr_threshold(
+                adaptive_perturbation_llr_threshold,
+                generation_max_iters,
+            );
             members = next_members;
         }
 
@@ -765,6 +854,8 @@ impl Decoder for SLGMBPDecoder {
         let mut generation_memory_strengths = Vec::<Array1<f64>>::new();
         let mut gamma_history = Vec::<f64>::new();
         let mut phase1_iterations = 0usize;
+        let mut adaptive_perturbation_llr_threshold =
+            self.initial_adaptive_perturbation_llr_threshold();
         let mut phase1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
 
         let mut dynamics_entries = Vec::<SLGMBPDynamicsEntry>::new();
@@ -773,7 +864,7 @@ impl Decoder for SLGMBPDecoder {
             let (decoding, posterior, iters, success, fitness) = match self.config.init_strategy {
                 InitStrategy::MinSum => {
                     let (decoding, posterior, iters, success, cumsum_abs) =
-                        self.run_min_sum_phase(detectors, init_llr);
+                        self.run_min_sum_phase(detectors, init_llr, None);
                     let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
                     let fitness = fitness_from_ms_cumsum(
                         residual,
@@ -795,6 +886,8 @@ impl Decoder for SLGMBPDecoder {
                         &gamma_vec,
                         self.config.t_ms,
                         false,
+                        false,
+                        None,
                     );
                     let residual = residual_weight(&self.get_detectors(decoding.view()), detectors);
                     let fitness = fitness_from_final_marginal(
@@ -913,6 +1006,7 @@ impl Decoder for SLGMBPDecoder {
             let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
             let mut gen_best = f64::NEG_INFINITY;
             let mut generation_iterations = 0usize;
+            let mut generation_max_iters = 0usize;
             let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
             let mut gen_best_member_fitness = f64::NEG_INFINITY;
             let mut gen_best_member_posterior: Option<Array1<f64>> = None;
@@ -920,7 +1014,12 @@ impl Decoder for SLGMBPDecoder {
             let mut gen_best_member_gamma: Option<Array1<f64>> = None;
 
             for (member_index, mut child) in children.into_iter().enumerate() {
-                let phase_prior = self.build_generation_phase_prior(&prior_llr, &mut child, &mut rng);
+                let phase_prior = self.build_generation_phase_prior(
+                    &prior_llr,
+                    &mut child,
+                    &mut rng,
+                    adaptive_perturbation_llr_threshold,
+                );
 
                 let member_gamma = self.sample_member_memory_strength(
                     &child.posterior,
@@ -935,6 +1034,8 @@ impl Decoder for SLGMBPDecoder {
                     &member_gamma,
                     self.config.t_mem,
                     self.config.reset_marginal,
+                    self.config.drop_p > 0.0,
+                    self.next_drop_seed(&mut rng),
                 );
 
                 let decoded_detectors = self.get_detectors(decoding.view());
@@ -974,6 +1075,8 @@ impl Decoder for SLGMBPDecoder {
                     iteration_count: iters,
                     estimated_error_weight: self.estimated_error_weight(&decoding, &prior_llr),
                 });
+
+                generation_max_iters = generation_max_iters.max(iters);
 
                 if fitness > best_fitness {
                     best_fitness = fitness;
@@ -1079,6 +1182,10 @@ impl Decoder for SLGMBPDecoder {
                     .clone()
                     .unwrap_or_else(|| Array1::from_elem(prior_llr.len(), self.config.init_gamma)),
             );
+            adaptive_perturbation_llr_threshold = self.next_adaptive_perturbation_llr_threshold(
+                adaptive_perturbation_llr_threshold,
+                generation_max_iters,
+            );
             members = next_members;
         }
 
@@ -1124,7 +1231,8 @@ mod tests {
     use super::SLGMBPDecoder;
     use crate::bp::min_sum::MinSumDecoderConfig;
     use crate::bp::slg_mbp::config::{
-        AdaptivePerturbationSignMode, SLGMBPDecoderConfig,
+        AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
+        SLGMBPDecoderConfig,
     };
     use crate::bipartite_graph::BipartiteGraph;
     use crate::decoder::SparseBitMatrix;
@@ -1143,6 +1251,10 @@ mod tests {
             max_data_value: None,
             int_bits: None,
             frac_bits: None,
+            enable_variable_message_drop: false,
+            drop_probability: 0.0,
+            drop_llr_threshold: 0.0,
+            rng_seed: None,
         };
         SLGMBPDecoder::new(
             Arc::new(check_matrix),
@@ -1164,10 +1276,59 @@ mod tests {
         let base_prior = array![1.0, -2.0, 0.75];
         let posterior = array![0.1, 0.3, -0.249];
 
-        let rebased = decoder.build_adaptive_prior(&base_prior, &posterior);
+        let rebased = decoder.build_adaptive_prior(&base_prior, &posterior, 0.25);
 
         let add_val = 3.0_f64.ln();
         assert_eq!(rebased, array![1.0 - add_val, -2.0, 0.75 - add_val]);
+    }
+
+    #[test]
+    fn adaptive_prior_random_sign_mode_respects_positive_probability_extremes() {
+        let base_prior = array![1.0, -2.0, 0.75];
+        let posterior = array![0.1, 0.3, -0.249];
+        let add_val = 3.0_f64.ln();
+
+        let positive_decoder = make_decoder(SLGMBPDecoderConfig {
+            adaptive_perturbation: true,
+            adaptive_perturbation_llr_threshold: 0.25,
+            adaptive_perturbation_factor: 3.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::Random,
+            adaptive_perturbation_positive_sign_prob: 1.0,
+            ..SLGMBPDecoderConfig::default()
+        });
+        let positive_rebased = positive_decoder.build_adaptive_prior(&base_prior, &posterior, 0.25);
+        assert_eq!(positive_rebased, array![1.0 + add_val, -2.0, 0.75 + add_val]);
+
+        let negative_decoder = make_decoder(SLGMBPDecoderConfig {
+            adaptive_perturbation: true,
+            adaptive_perturbation_llr_threshold: 0.25,
+            adaptive_perturbation_factor: 3.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::Random,
+            adaptive_perturbation_positive_sign_prob: 0.0,
+            ..SLGMBPDecoderConfig::default()
+        });
+        let negative_rebased = negative_decoder.build_adaptive_prior(&base_prior, &posterior, 0.25);
+        assert_eq!(negative_rebased, array![1.0 - add_val, -2.0, 0.75 - add_val]);
+    }
+
+    #[test]
+    fn dynamic_adaptive_threshold_starts_at_min_and_clips_to_max() {
+        let decoder = make_decoder(SLGMBPDecoderConfig {
+            adaptive_perturbation_llr_threshold_mode:
+                AdaptivePerturbationThresholdMode::GenerationLog10Iter,
+            adaptive_perturbation_llr_threshold_min: 0.25,
+            adaptive_perturbation_llr_threshold_max: 0.5,
+            adaptive_perturbation_llr_threshold_factor: 0.15,
+            ..SLGMBPDecoderConfig::default()
+        });
+
+        let initial = decoder.initial_adaptive_perturbation_llr_threshold();
+        let after_ten = decoder.next_adaptive_perturbation_llr_threshold(initial, 10);
+        let after_hundred = decoder.next_adaptive_perturbation_llr_threshold(after_ten, 100);
+
+        assert!((initial - 0.25).abs() < 1e-12);
+        assert!((after_ten - 0.4).abs() < 1e-12);
+        assert!((after_hundred - 0.5).abs() < 1e-12);
     }
 
     #[test]

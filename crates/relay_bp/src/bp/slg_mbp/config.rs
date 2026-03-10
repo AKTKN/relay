@@ -49,6 +49,12 @@ pub enum AdaptivePerturbationSignMode {
     AlwaysNegative,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptivePerturbationThresholdMode {
+    Constant,
+    GenerationLog10Iter,
+}
+
 #[derive(Clone, Debug)]
 pub struct SLGMBPDecoderConfig {
     pub ensemble_size: usize,
@@ -80,12 +86,19 @@ pub struct SLGMBPDecoderConfig {
     pub init_strategy: InitStrategy,
     pub init_gamma: f64,
     pub adaptive_perturbation: bool,
+    pub adaptive_perturbation_llr_threshold_mode: AdaptivePerturbationThresholdMode,
     pub adaptive_perturbation_llr_threshold: f64,
+    pub adaptive_perturbation_llr_threshold_min: f64,
+    pub adaptive_perturbation_llr_threshold_max: f64,
+    pub adaptive_perturbation_llr_threshold_factor: f64,
     pub adaptive_perturbation_factor: f64,
     pub adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode,
+    pub adaptive_perturbation_positive_sign_prob: f64,
     pub continue_perturbation: bool,
     pub perturbation_method: PerturbationMethod,
     pub reset_marginal: bool,
+    pub drop_p: f64,
+    pub drop_llr_threshold: f64,
     pub seed: u64,
 }
 
@@ -121,19 +134,32 @@ impl Default for SLGMBPDecoderConfig {
             init_strategy: InitStrategy::MinSum,
             init_gamma: 0.125,
             adaptive_perturbation: false,
+            adaptive_perturbation_llr_threshold_mode: AdaptivePerturbationThresholdMode::Constant,
             adaptive_perturbation_llr_threshold: 0.0,
+            adaptive_perturbation_llr_threshold_min: 0.0,
+            adaptive_perturbation_llr_threshold_max: 0.0,
+            adaptive_perturbation_llr_threshold_factor: 0.0,
             adaptive_perturbation_factor: 1.0,
             adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::Random,
+            adaptive_perturbation_positive_sign_prob: 0.5,
             continue_perturbation: false,
             perturbation_method: PerturbationMethod::Fixed,
             reset_marginal: false,
+            drop_p: 0.0,
+            drop_llr_threshold: 0.0,
             seed: 0,
         }
     }
 }
 
 impl SLGMBPDecoderConfig {
-    pub fn min_sum_template_from_priors(&self, priors: Array1<f64>, max_iter: usize) -> MinSumDecoderConfig {
+    pub fn min_sum_template_from_priors(
+        &self,
+        priors: Array1<f64>,
+        max_iter: usize,
+        enable_variable_message_drop: bool,
+        rng_seed: Option<u64>,
+    ) -> MinSumDecoderConfig {
         MinSumDecoderConfig {
             error_priors: priors,
             max_iter,
@@ -144,6 +170,10 @@ impl SLGMBPDecoderConfig {
             max_data_value: None,
             int_bits: None,
             frac_bits: None,
+            enable_variable_message_drop,
+            drop_probability: self.drop_p,
+            drop_llr_threshold: self.drop_llr_threshold,
+            rng_seed,
         }
     }
 }

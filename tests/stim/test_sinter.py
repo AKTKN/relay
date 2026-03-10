@@ -16,6 +16,7 @@ import tempfile
 
 from relay_bp.stim import (
     SinterDecoder_RelayBP,
+    SinterDecoder_SLGMBP,
     sinter_decoders,
     CheckMatrices,
 )
@@ -222,6 +223,65 @@ def test_sinter_decode_via_files():
             num_observables=dem.num_observables,
         )
         assert np.sum(predictions) <= 5
+
+
+def test_slg_mbp_decoder_accepts_drop_params():
+    circuit = stim.Circuit.generated(
+        rounds=3,
+        distance=3,
+        after_clifford_depolarization=0.0001,
+        code_task=f"surface_code:rotated_memory_x",
+    )
+    dem = circuit.detector_error_model(decompose_errors=True)
+    check_matrices = CheckMatrices.from_dem(dem, decomposed_hyperedges=True)
+
+    decoder = SinterDecoder_SLGMBP(drop_p=0.5, drop_llr_threshold=1.0)
+    observable_decoder = decoder.build_observable_decoder(check_matrices)
+
+    assert observable_decoder is not None
+
+
+def test_slg_mbp_decoder_accepts_adaptive_perturbation_sign_probability():
+    circuit = stim.Circuit.generated(
+        rounds=3,
+        distance=3,
+        after_clifford_depolarization=0.0001,
+        code_task=f"surface_code:rotated_memory_x",
+    )
+    dem = circuit.detector_error_model(decompose_errors=True)
+    check_matrices = CheckMatrices.from_dem(dem, decomposed_hyperedges=True)
+
+    decoder = SinterDecoder_SLGMBP(
+        adaptive_perturbation=True,
+        adaptive_perturbation_sign_mode="random",
+        adaptive_perturbation_positive_sign_prob=0.8,
+    )
+    observable_decoder = decoder.build_observable_decoder(check_matrices)
+
+    assert observable_decoder is not None
+
+
+def test_slg_mbp_decoder_accepts_dynamic_adaptive_perturbation_threshold_params():
+    circuit = stim.Circuit.generated(
+        rounds=3,
+        distance=3,
+        after_clifford_depolarization=0.0001,
+        code_task=f"surface_code:rotated_memory_x",
+    )
+    dem = circuit.detector_error_model(decompose_errors=True)
+    check_matrices = CheckMatrices.from_dem(dem, decomposed_hyperedges=True)
+
+    decoder = SinterDecoder_SLGMBP(
+        adaptive_perturbation=True,
+        adaptive_perturbation_llr_threshold_mode="generation_log10_iter",
+        adaptive_perturbation_llr_threshold=0.5,
+        adaptive_perturbation_llr_threshold_min=0.5,
+        adaptive_perturbation_llr_threshold_max=2.0,
+        adaptive_perturbation_llr_threshold_factor=0.25,
+    )
+    observable_decoder = decoder.build_observable_decoder(check_matrices)
+
+    assert observable_decoder is not None
 
 
 def test_get_testdata_circuit():

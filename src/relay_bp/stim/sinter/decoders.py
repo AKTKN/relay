@@ -424,12 +424,19 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         init_strategy: str = "min-sum",
         init_gamma: float = 0.125,
         adaptive_perturbation: bool = False,
+        adaptive_perturbation_llr_threshold_mode: str = "constant",
         adaptive_perturbation_llr_threshold: float = 0.0,
+        adaptive_perturbation_llr_threshold_min: float = 0.0,
+        adaptive_perturbation_llr_threshold_max: float = 0.0,
+        adaptive_perturbation_llr_threshold_factor: float = 0.0,
         adaptive_perturbation_factor: float = 1.0,
         adaptive_perturbation_sign_mode: str = "random",
+        adaptive_perturbation_positive_sign_prob: float = 0.5,
         continue_perturbation: bool = False,
         perturbation_method: str = "fixed",
         reset_marginal: bool = False,
+        drop_p: float = 0.0,
+        drop_llr_threshold: float = 0.0,
         selection_mode: str = "weighted",
         weighted_selection_mode: str = "softmax",
         gamma_mode: str = "fixed",
@@ -467,12 +474,33 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         self.init_strategy = init_strategy
         self.init_gamma = init_gamma
         self.adaptive_perturbation = adaptive_perturbation
+        self.adaptive_perturbation_llr_threshold_mode = (
+            adaptive_perturbation_llr_threshold_mode
+        )
         self.adaptive_perturbation_llr_threshold = adaptive_perturbation_llr_threshold
+        self.adaptive_perturbation_llr_threshold_min = (
+            adaptive_perturbation_llr_threshold_min
+        )
+        self.adaptive_perturbation_llr_threshold_max = (
+            adaptive_perturbation_llr_threshold_max
+        )
+        self.adaptive_perturbation_llr_threshold_factor = (
+            adaptive_perturbation_llr_threshold_factor
+        )
         self.adaptive_perturbation_factor = adaptive_perturbation_factor
         self.adaptive_perturbation_sign_mode = adaptive_perturbation_sign_mode
+        if not 0.0 <= adaptive_perturbation_positive_sign_prob <= 1.0:
+            raise ValueError(
+                "adaptive_perturbation_positive_sign_prob must be between 0.0 and 1.0"
+            )
+        self.adaptive_perturbation_positive_sign_prob = (
+            adaptive_perturbation_positive_sign_prob
+        )
         self.continue_perturbation = continue_perturbation
         self.perturbation_method = perturbation_method
         self.reset_marginal = reset_marginal
+        self.drop_p = drop_p
+        self.drop_llr_threshold = drop_llr_threshold
         self.selection_mode = selection_mode
         self.weighted_selection_mode = weighted_selection_mode
         self.gamma_mode = gamma_mode
@@ -520,12 +548,19 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             init_strategy=self.init_strategy,
             init_gamma=self.init_gamma,
             adaptive_perturbation=self.adaptive_perturbation,
+            adaptive_perturbation_llr_threshold_mode=self.adaptive_perturbation_llr_threshold_mode,
             adaptive_perturbation_llr_threshold=self.adaptive_perturbation_llr_threshold,
+            adaptive_perturbation_llr_threshold_min=self.adaptive_perturbation_llr_threshold_min,
+            adaptive_perturbation_llr_threshold_max=self.adaptive_perturbation_llr_threshold_max,
+            adaptive_perturbation_llr_threshold_factor=self.adaptive_perturbation_llr_threshold_factor,
             adaptive_perturbation_factor=self.adaptive_perturbation_factor,
             adaptive_perturbation_sign_mode=self.adaptive_perturbation_sign_mode,
+            adaptive_perturbation_positive_sign_prob=self.adaptive_perturbation_positive_sign_prob,
             continue_perturbation=self.continue_perturbation,
             perturbation_method=self.perturbation_method,
             reset_marginal=self.reset_marginal,
+            drop_p=self.drop_p,
+            drop_llr_threshold=self.drop_llr_threshold,
             selection_mode=self.selection_mode,
             weighted_selection_mode=self.weighted_selection_mode,
             gamma_mode=self.gamma_mode,

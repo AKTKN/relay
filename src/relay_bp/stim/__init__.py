@@ -19,5 +19,6 @@ from .sinter import (
     SinterDecoder_MemBP,
     SinterDecoder_MSLBP,
     SinterDecoder_RelayBP,
+    SinterDecoder_SLGMBP,
     sinter_decoders,
 )

@@ -16,6 +16,8 @@ use log::debug;
 use ndarray::{Array1, ArrayView1};
 use num_traits::FromPrimitive;
 use num_traits::{Bounded, Signed, ToPrimitive};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use sprs::CsMatView;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -31,6 +33,10 @@ pub struct MinSumDecoderConfig {
     pub max_data_value: Option<f64>,
     pub int_bits: Option<isize>,
     pub frac_bits: Option<isize>,
+    pub enable_variable_message_drop: bool,
+    pub drop_probability: f64,
+    pub drop_llr_threshold: f64,
+    pub rng_seed: Option<u64>,
 }
 
 impl Default for MinSumDecoderConfig {
@@ -45,6 +51,10 @@ impl Default for MinSumDecoderConfig {
             max_data_value: None,
             int_bits: None,
             frac_bits: None,
+            enable_variable_message_drop: false,
+            drop_probability: 0.0,
+            drop_llr_threshold: 0.0,
+            rng_seed: None,
         }
     }
 }
@@ -88,6 +98,7 @@ pub struct MinSumBPDecoder<N: PartialEq + Default + Clone + Copy> {
     decoding: Array1<Bit>,
     max_data_value: Option<N>,
     data_scale_value: Option<N>,
+    message_drop_rng: Option<StdRng>,
     pub current_iteration: usize,
 }
 
@@ -161,6 +172,11 @@ where
         };
 
         let decoding = Array1::zeros(check_matrix.cols());
+        let message_drop_rng = if config.enable_variable_message_drop && config.drop_probability > 0.0 {
+            config.rng_seed.map(StdRng::seed_from_u64)
+        } else {
+            None
+        };
 
         MinSumBPDecoder::<N> {
             check_matrix,
@@ -175,6 +191,7 @@ where
             decoding,
             max_data_value,
             data_scale_value,
+            message_drop_rng,
             current_iteration: 0,
         }
     }
@@ -447,54 +464,93 @@ where
         bp_component + memory_component
     }
 
+    fn variable_message_drop_enabled(&self) -> bool {
+        self.config.enable_variable_message_drop && self.config.drop_probability > 0.0
+    }
+
+    fn should_drop_variable_messages(&mut self, variable: usize) -> bool {
+        if !self.variable_message_drop_enabled() {
+            return false;
+        }
+
+        let llr_abs = self.posterior_ratio_f64(variable).abs();
+        if !llr_abs.is_finite() || llr_abs < self.config.drop_llr_threshold.abs() {
+            return false;
+        }
+
+        let Some(rng) = self.message_drop_rng.as_mut() else {
+            return false;
+        };
+
+        rng.gen_bool(self.config.drop_probability.clamp(0.0, 1.0))
+    }
+
+    fn zero_variable_to_check_messages<I>(&mut self, indices: I)
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        for ind in indices {
+            let map_ind = self.check_to_variable_nnz_map[ind];
+            self.variable_to_check.data_mut()[map_ind] = N::zero();
+        }
+    }
+
     /// Compute bit to check message iteration
     fn compute_variable_to_check(&mut self) -> &mut SparseBipartiteGraph<N> {
-        for (check_var_col_ind, check_var_col_vec) in
-            self.check_to_variable.outer_iterator().enumerate()
-        {
-            // Accumulate messages
-            let mut check_to_var_row_sum = self.compute_variable_prior(check_var_col_ind);
+        for check_var_col_ind in 0..self.check_to_variable.outer_dims() {
+            let drop_indices = {
+                let check_var_col_vec = self.check_to_variable.outer_view(check_var_col_ind).unwrap();
+                // Accumulate messages
+                let mut check_to_var_row_sum = self.compute_variable_prior(check_var_col_ind);
 
-            debug!("Check messages for col {check_var_col_ind:?}: {check_var_col_vec:?}");
+                debug!("Check messages for col {check_var_col_ind:?}: {check_var_col_vec:?}");
 
-            let data_range = self
-                .check_to_variable
-                .indptr()
-                .outer_inds(check_var_col_ind);
+                let data_range = self
+                    .check_to_variable
+                    .indptr()
+                    .outer_inds(check_var_col_ind);
+                let drop_indices: Vec<usize> = data_range.clone().collect();
 
-            // Perform iteration in the forward direction to accumulate left to right
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            ) {
-                self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
-                    check_to_var_row_sum;
-                check_to_var_row_sum += *check_var_row_val;
-            }
+                // Perform iteration in the forward direction to accumulate left to right
+                for (ind, check_var_row_val) in izip!(
+                    data_range.clone(),
+                    &self.check_to_variable.data()[data_range.clone()]
+                ) {
+                    self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
+                        check_to_var_row_sum;
+                    check_to_var_row_sum += *check_var_row_val;
+                }
 
-            self.posterior_ratios[check_var_col_ind] = check_to_var_row_sum;
+                self.posterior_ratios[check_var_col_ind] = check_to_var_row_sum;
 
-            // Now perform iteration in the reverse direction to accumulate right to left
-            check_to_var_row_sum = N::zero();
-            // Remove each messages contribution
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            )
-            .rev()
-            {
-                let map_ind = self.check_to_variable_nnz_map[ind];
-                self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
-                check_to_var_row_sum += *check_var_row_val;
+                // Now perform iteration in the reverse direction to accumulate right to left
+                check_to_var_row_sum = N::zero();
+                // Remove each messages contribution
+                for (ind, check_var_row_val) in izip!(
+                    data_range.clone(),
+                    &self.check_to_variable.data()[data_range.clone()]
+                )
+                .rev()
+                {
+                    let map_ind = self.check_to_variable_nnz_map[ind];
+                    self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
+                    check_to_var_row_sum += *check_var_row_val;
 
-                // We directly manipulate the indicies of the variable_to_check matrix using
-                // the cached value map to avoid the need for a logarithmic insert
-                debug!(
-                    "location ({:?}, {:?}), variable_to_check: {:.32}",
-                    self.check_to_variable.indices()[ind],
-                    check_var_col_ind,
-                    self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
-                );
+                    // We directly manipulate the indicies of the variable_to_check matrix using
+                    // the cached value map to avoid the need for a logarithmic insert
+                    debug!(
+                        "location ({:?}, {:?}), variable_to_check: {:.32}",
+                        self.check_to_variable.indices()[ind],
+                        check_var_col_ind,
+                        self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
+                    );
+                }
+
+                drop_indices
+            };
+
+            if self.should_drop_variable_messages(check_var_col_ind) {
+                self.zero_variable_to_check_messages(drop_indices);
             }
         }
 
@@ -508,56 +564,64 @@ where
     /// This first computes the standard BP marginal M'_t = prior + incoming check messages,
     /// then applies memory blending M_t = (1-gamma) * M'_t + gamma * M_{t-1}.
     fn compute_variable_to_check_lrbp(&mut self) -> &mut SparseBipartiteGraph<N> {
-        for (check_var_col_ind, check_var_col_vec) in
-            self.check_to_variable.outer_iterator().enumerate()
-        {
-            // Start from the plain BP prior (without pre-mixing with memory).
-            let mut check_to_var_row_sum = self.log_prior_ratios[check_var_col_ind];
+        for check_var_col_ind in 0..self.check_to_variable.outer_dims() {
+            let drop_indices = {
+                let check_var_col_vec = self.check_to_variable.outer_view(check_var_col_ind).unwrap();
+                // Start from the plain BP prior (without pre-mixing with memory).
+                let mut check_to_var_row_sum = self.log_prior_ratios[check_var_col_ind];
 
-            debug!("Check messages for col {check_var_col_ind:?}: {check_var_col_vec:?}");
+                debug!("Check messages for col {check_var_col_ind:?}: {check_var_col_vec:?}");
 
-            let data_range = self
-                .check_to_variable
-                .indptr()
-                .outer_inds(check_var_col_ind);
+                let data_range = self
+                    .check_to_variable
+                    .indptr()
+                    .outer_inds(check_var_col_ind);
+                let drop_indices: Vec<usize> = data_range.clone().collect();
 
-            // Perform iteration in the forward direction to accumulate left to right.
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            ) {
-                self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
-                    check_to_var_row_sum;
-                check_to_var_row_sum += *check_var_row_val;
-            }
+                // Perform iteration in the forward direction to accumulate left to right.
+                for (ind, check_var_row_val) in izip!(
+                    data_range.clone(),
+                    &self.check_to_variable.data()[data_range.clone()]
+                ) {
+                    self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]] =
+                        check_to_var_row_sum;
+                    check_to_var_row_sum += *check_var_row_val;
+                }
 
-            let bp_marginal = check_to_var_row_sum;
-            let previous_marginal = self.posterior_ratios[check_var_col_ind];
-            self.posterior_ratios[check_var_col_ind] = self.blend_marginal_with_memory(
-                bp_marginal,
-                previous_marginal,
-                check_var_col_ind,
-            );
-
-            // Now perform iteration in the reverse direction to accumulate right to left.
-            check_to_var_row_sum = N::zero();
-            // Remove each message contribution.
-            for (ind, check_var_row_val) in izip!(
-                data_range.clone(),
-                &self.check_to_variable.data()[data_range.clone()]
-            )
-            .rev()
-            {
-                let map_ind = self.check_to_variable_nnz_map[ind];
-                self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
-                check_to_var_row_sum += *check_var_row_val;
-
-                debug!(
-                    "location ({:?}, {:?}), variable_to_check: {:.32}",
-                    self.check_to_variable.indices()[ind],
+                let bp_marginal = check_to_var_row_sum;
+                let previous_marginal = self.posterior_ratios[check_var_col_ind];
+                self.posterior_ratios[check_var_col_ind] = self.blend_marginal_with_memory(
+                    bp_marginal,
+                    previous_marginal,
                     check_var_col_ind,
-                    self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
                 );
+
+                // Now perform iteration in the reverse direction to accumulate right to left.
+                check_to_var_row_sum = N::zero();
+                // Remove each message contribution.
+                for (ind, check_var_row_val) in izip!(
+                    data_range.clone(),
+                    &self.check_to_variable.data()[data_range.clone()]
+                )
+                .rev()
+                {
+                    let map_ind = self.check_to_variable_nnz_map[ind];
+                    self.variable_to_check.data_mut()[map_ind] += check_to_var_row_sum;
+                    check_to_var_row_sum += *check_var_row_val;
+
+                    debug!(
+                        "location ({:?}, {:?}), variable_to_check: {:.32}",
+                        self.check_to_variable.indices()[ind],
+                        check_var_col_ind,
+                        self.variable_to_check.data_mut()[self.check_to_variable_nnz_map[ind]]
+                    );
+                }
+
+                drop_indices
+            };
+
+            if self.should_drop_variable_messages(check_var_col_ind) {
+                self.zero_variable_to_check_messages(drop_indices);
             }
         }
 
@@ -670,6 +734,14 @@ where
                     reverse_sum += self.check_to_variable.data()[c2v_nnz_idx.0];
                 }
             }
+        }
+
+        if self.should_drop_variable_messages(variable_idx) {
+            let drop_indices: Vec<usize> = check_neighbors.iter().filter_map(|check_idx| {
+                self.check_to_variable.nnz_index(*check_idx, variable_idx)
+                    .map(|nnz_idx| nnz_idx.0)
+            }).collect();
+            self.zero_variable_to_check_messages(drop_indices);
         }
 
         self.bound_magnitudes();
@@ -1157,5 +1229,62 @@ mod tests {
         );
 
         assert_eq!(results[0].decoding.len(), 8785);
+    }
+
+    #[test]
+    fn variable_message_drop_zeros_selected_variable_edges() {
+        init();
+
+        let check_matrix = array![[1, 1, 0], [0, 1, 1],];
+        let check_matrix: SparseBipartiteGraph<_> = SparseBipartiteGraph::from_dense(check_matrix);
+        let arc_check_matrix = Arc::new(check_matrix);
+
+        let bp_config = MinSumDecoderConfig {
+            error_priors: array![0.1, 0.45, 0.45],
+            enable_variable_message_drop: true,
+            drop_probability: 1.0,
+            drop_llr_threshold: 1.0,
+            rng_seed: Some(7),
+            ..Default::default()
+        };
+        let config = Arc::new(bp_config);
+
+        let mut decoder: MinSumBPDecoder<f64> = MinSumBPDecoder::new(arc_check_matrix, config);
+        decoder.initialize_check_to_variable();
+        decoder.run_variable_to_check_update();
+
+        let dropped_edge = decoder.variable_to_check.nnz_index(0, 0).unwrap().0;
+        let kept_edge_a = decoder.variable_to_check.nnz_index(0, 1).unwrap().0;
+        let kept_edge_b = decoder.variable_to_check.nnz_index(1, 1).unwrap().0;
+
+        assert_eq!(decoder.variable_to_check.data()[dropped_edge], 0.0);
+        assert_ne!(decoder.variable_to_check.data()[kept_edge_a], 0.0);
+        assert_ne!(decoder.variable_to_check.data()[kept_edge_b], 0.0);
+    }
+
+    #[test]
+    fn variable_message_drop_respects_threshold() {
+        init();
+
+        let check_matrix = array![[1, 1, 0], [0, 1, 1],];
+        let check_matrix: SparseBipartiteGraph<_> = SparseBipartiteGraph::from_dense(check_matrix);
+        let arc_check_matrix = Arc::new(check_matrix);
+
+        let bp_config = MinSumDecoderConfig {
+            error_priors: array![0.1, 0.45, 0.45],
+            enable_variable_message_drop: true,
+            drop_probability: 1.0,
+            drop_llr_threshold: 3.0,
+            rng_seed: Some(7),
+            ..Default::default()
+        };
+        let config = Arc::new(bp_config);
+
+        let mut decoder: MinSumBPDecoder<f64> = MinSumBPDecoder::new(arc_check_matrix, config);
+        decoder.initialize_check_to_variable();
+        decoder.run_variable_to_check_update();
+
+        let edge = decoder.variable_to_check.nnz_index(0, 0).unwrap().0;
+        assert_ne!(decoder.variable_to_check.data()[edge], 0.0);
     }
 }
