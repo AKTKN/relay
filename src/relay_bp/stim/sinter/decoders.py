@@ -432,9 +432,12 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         adaptive_perturbation_factor: float = 1.0,
         adaptive_perturbation_sign_mode: str = "random",
         adaptive_perturbation_positive_sign_prob: float = 0.5,
+        adaptive_perturbation_target: str = "prior",
         continue_perturbation: bool = False,
         perturbation_method: str = "fixed",
         reset_marginal: bool = False,
+        marginal_carry_damping_factor: float = 1.0,
+        marginal_carry_llr_abs_threshold: float = -1.0,
         drop_p: float = 0.0,
         drop_llr_threshold: float = 0.0,
         selection_mode: str = "weighted",
@@ -501,9 +504,23 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         self.adaptive_perturbation_positive_sign_prob = (
             adaptive_perturbation_positive_sign_prob
         )
+        self.adaptive_perturbation_target = adaptive_perturbation_target
         self.continue_perturbation = continue_perturbation
         self.perturbation_method = perturbation_method
         self.reset_marginal = reset_marginal
+        if not 0.0 <= marginal_carry_damping_factor <= 1.0:
+            raise ValueError(
+                "marginal_carry_damping_factor must be between 0.0 and 1.0"
+            )
+        if (
+            marginal_carry_llr_abs_threshold < 0.0
+            and marginal_carry_llr_abs_threshold != -1.0
+        ):
+            raise ValueError(
+                "marginal_carry_llr_abs_threshold must be -1.0 (all variables) or >= 0.0"
+            )
+        self.marginal_carry_damping_factor = marginal_carry_damping_factor
+        self.marginal_carry_llr_abs_threshold = marginal_carry_llr_abs_threshold
         self.drop_p = drop_p
         self.drop_llr_threshold = drop_llr_threshold
         self.selection_mode = selection_mode
@@ -566,9 +583,12 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             adaptive_perturbation_factor=self.adaptive_perturbation_factor,
             adaptive_perturbation_sign_mode=self.adaptive_perturbation_sign_mode,
             adaptive_perturbation_positive_sign_prob=self.adaptive_perturbation_positive_sign_prob,
+            adaptive_perturbation_target=self.adaptive_perturbation_target,
             continue_perturbation=self.continue_perturbation,
             perturbation_method=self.perturbation_method,
             reset_marginal=self.reset_marginal,
+            marginal_carry_damping_factor=self.marginal_carry_damping_factor,
+            marginal_carry_llr_abs_threshold=self.marginal_carry_llr_abs_threshold,
             drop_p=self.drop_p,
             drop_llr_threshold=self.drop_llr_threshold,
             selection_mode=self.selection_mode,

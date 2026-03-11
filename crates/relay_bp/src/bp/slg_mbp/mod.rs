@@ -14,8 +14,9 @@ pub mod init_population;
 pub mod trace;
 
 use config::{
-    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
-    GammaMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationTarget,
+    AdaptivePerturbationThresholdMode, GammaMode, InitStrategy, PerturbationMethod,
+    SLGMBPDecoderConfig,
 };
 use evaluate::{fitness_from_final_marginal, fitness_from_ms_cumsum, residual_weight};
 use ga_ops::{build_next_generation, PopulationMember};
@@ -104,6 +105,7 @@ impl SLGMBPDecoder {
         detectors: ArrayView1<'_, Bit>,
         prior_llr: &Array1<f64>,
         child_llr: &Array1<f64>,
+        initial_marginal_override: Option<&Array1<f64>>,
         gamma_per_variable: &Array1<f64>,
         max_iter: usize,
         reset_marginal: bool,
@@ -119,7 +121,9 @@ impl SLGMBPDecoder {
         );
         let mut decoder = MinSumBPDecoder::<f64>::new(self.check_matrix.clone(), Arc::new(cfg));
 
-        let mut prev_marginal = self.initial_marginal(prior_llr, child_llr, reset_marginal);
+        let mut prev_marginal = initial_marginal_override
+            .cloned()
+            .unwrap_or_else(|| self.initial_marginal(prior_llr, child_llr, reset_marginal));
 
         decoder.current_iteration = 0;
         decoder.set_log_prior_ratio_f64(prev_marginal.clone());
@@ -160,10 +164,28 @@ impl SLGMBPDecoder {
         child_llr: &Array1<f64>,
         reset_marginal: bool,
     ) -> Array1<f64> {
-        if reset_marginal {
+        let carry_damping = if reset_marginal {
+            0.0
+        } else {
+            self.config.marginal_carry_damping_factor.clamp(0.0, 1.0)
+        };
+
+        if carry_damping <= 0.0 {
             prior_llr.clone()
         } else {
-            child_llr.mapv(|v| self.config.eta * v)
+            let threshold = self.config.marginal_carry_llr_abs_threshold;
+            let use_all_variables = (threshold + 1.0).abs() < f64::EPSILON;
+            let threshold_abs = threshold.abs();
+
+            Array1::from_iter(prior_llr.iter().zip(child_llr.iter()).map(|(&prior, &child)| {
+                let eligible = use_all_variables || child.abs() >= threshold_abs;
+                if !eligible {
+                    prior
+                } else {
+                    let carried = self.config.eta * child;
+                    (1.0 - carry_damping) * prior + carry_damping * carried
+                }
+            }))
         }
     }
 
@@ -211,22 +233,21 @@ impl SLGMBPDecoder {
         }
     }
 
-    fn build_adaptive_prior(
+    fn apply_adaptive_perturbation(
         &self,
-        base_prior_llr: &Array1<f64>,
+        target_llr: &Array1<f64>,
         posterior: &Array1<f64>,
         adaptive_perturbation_llr_threshold: f64,
     ) -> Array1<f64> {
         if !self.config.adaptive_perturbation {
-            return base_prior_llr.clone();
+            return target_llr.clone();
         }
 
         let threshold = adaptive_perturbation_llr_threshold.abs();
         let add_val = self.config.adaptive_perturbation_factor.ln();
-        
         let mut rng = rand::thread_rng();
 
-        Array1::from_iter(base_prior_llr.iter().zip(posterior.iter()).map(|(&prior, &llr)| {
+        Array1::from_iter(target_llr.iter().zip(posterior.iter()).map(|(&target, &llr)| {
             if llr.abs() < threshold {
                 let sign = match self.config.adaptive_perturbation_sign_mode {
                     AdaptivePerturbationSignMode::Random => {
@@ -238,11 +259,47 @@ impl SLGMBPDecoder {
                     }
                     AdaptivePerturbationSignMode::AlwaysNegative => -1.0,
                 };
-                prior + (sign * add_val)
+                target + (sign * add_val)
             } else {
-                prior
+                target
             }
         }))
+    }
+
+    fn build_adaptive_prior(
+        &self,
+        base_prior_llr: &Array1<f64>,
+        posterior: &Array1<f64>,
+        adaptive_perturbation_llr_threshold: f64,
+    ) -> Array1<f64> {
+        match self.config.adaptive_perturbation_target {
+            AdaptivePerturbationTarget::Prior | AdaptivePerturbationTarget::Both => self
+                .apply_adaptive_perturbation(
+                    base_prior_llr,
+                    posterior,
+                    adaptive_perturbation_llr_threshold,
+                ),
+            AdaptivePerturbationTarget::Posterior => base_prior_llr.clone(),
+        }
+    }
+
+    fn build_adaptive_initial_marginal(
+        &self,
+        phase_prior: &Array1<f64>,
+        posterior: &Array1<f64>,
+        adaptive_perturbation_llr_threshold: f64,
+        reset_marginal: bool,
+    ) -> Array1<f64> {
+        let initial_marginal = self.initial_marginal(phase_prior, posterior, reset_marginal);
+        match self.config.adaptive_perturbation_target {
+            AdaptivePerturbationTarget::Posterior | AdaptivePerturbationTarget::Both => self
+                .apply_adaptive_perturbation(
+                    &initial_marginal,
+                    posterior,
+                    adaptive_perturbation_llr_threshold,
+                ),
+            AdaptivePerturbationTarget::Prior => initial_marginal,
+        }
     }
 
     fn build_generation_phase_prior(
@@ -559,6 +616,12 @@ impl SLGMBPDecoder {
                         detectors,
                         &prior_llr,
                         &current_posterior,
+                        Some(&self.build_adaptive_initial_marginal(
+                            &prior_llr,
+                            &current_posterior,
+                            adaptive_perturbation_llr_threshold,
+                            false,
+                        )),
                         &relay_gamma,
                         self.config.biased_relay_r_relay_iter,
                         false, // relay legs always carry marginals forward
@@ -708,11 +771,18 @@ impl SLGMBPDecoder {
                 // (b) Constant mem-bp leg with init_gamma.
                 let constant_gamma =
                     Array1::from_elem(prior_llr.len(), self.config.init_gamma);
+                let initial_marginal = self.build_adaptive_initial_marginal(
+                    &phase_prior,
+                    &child.posterior,
+                    adaptive_perturbation_llr_threshold,
+                    self.config.reset_marginal,
+                );
 
                 let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
                     detectors,
                     &phase_prior,
                     &child.posterior,
+                    Some(&initial_marginal),
                     &constant_gamma,
                     self.config.biased_relay_t_0,
                     self.config.reset_marginal,
@@ -769,6 +839,12 @@ impl SLGMBPDecoder {
                 let mut last_relay_decoding = decoding;
 
                 for _relay_leg in 0..self.config.biased_relay_r_relay {
+                    let relay_initial_marginal = self.build_adaptive_initial_marginal(
+                        &phase_prior,
+                        &current_posterior,
+                        adaptive_perturbation_llr_threshold,
+                        false,
+                    );
                     let relay_gamma = self.sample_relay_gamma(prior_llr.len(), &mut rng);
 
                     let (relay_dec, relay_post, relay_iters, relay_success) =
@@ -776,6 +852,7 @@ impl SLGMBPDecoder {
                             detectors,
                             &phase_prior,
                             &current_posterior,
+                            Some(&relay_initial_marginal),
                             &relay_gamma,
                             self.config.biased_relay_r_relay_iter,
                             false, // relay legs always carry marginals
@@ -974,6 +1051,7 @@ impl Decoder for SLGMBPDecoder {
                         detectors,
                         &prior_llr,
                         init_llr,
+                        None,
                         &gamma_vec,
                         phase1_t,
                         false,
@@ -1122,6 +1200,12 @@ impl Decoder for SLGMBPDecoder {
                     detectors,
                     &phase_prior,
                     &child.posterior,
+                    Some(&self.build_adaptive_initial_marginal(
+                        &phase_prior,
+                        &child.posterior,
+                        adaptive_perturbation_llr_threshold,
+                        self.config.reset_marginal,
+                    )),
                     &member_gamma,
                     self.config.t_mem,
                     self.config.reset_marginal,
@@ -1316,6 +1400,7 @@ impl Decoder for SLGMBPDecoder {
                         detectors,
                         &prior_llr,
                         init_llr,
+                        None,
                         &gamma_vec,
                         self.config.t_ms,
                         false,
@@ -1464,6 +1549,12 @@ impl Decoder for SLGMBPDecoder {
                     detectors,
                     &phase_prior,
                     &child.posterior,
+                    Some(&self.build_adaptive_initial_marginal(
+                        &phase_prior,
+                        &child.posterior,
+                        adaptive_perturbation_llr_threshold,
+                        self.config.reset_marginal,
+                    )),
                     &member_gamma,
                     self.config.t_mem,
                     self.config.reset_marginal,
@@ -1664,7 +1755,8 @@ mod tests {
     use super::SLGMBPDecoder;
     use crate::bp::min_sum::MinSumDecoderConfig;
     use crate::bp::slg_mbp::config::{
-        AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
+        AdaptivePerturbationSignMode, AdaptivePerturbationTarget,
+        AdaptivePerturbationThresholdMode,
         SLGMBPDecoderConfig,
     };
     use crate::bipartite_graph::BipartiteGraph;
@@ -1742,6 +1834,49 @@ mod tests {
         });
         let negative_rebased = negative_decoder.build_adaptive_prior(&base_prior, &posterior, 0.25);
         assert_eq!(negative_rebased, array![1.0 - add_val, -2.0, 0.75 - add_val]);
+    }
+
+    #[test]
+    fn adaptive_initial_marginal_supports_posterior_and_both_targets() {
+        let base_prior = array![1.0, -2.0, 0.75];
+        let posterior = array![0.1, 0.3, -0.249];
+        let add_val = 3.0_f64.ln();
+
+        let posterior_decoder = make_decoder(SLGMBPDecoderConfig {
+            adaptive_perturbation: true,
+            adaptive_perturbation_llr_threshold: 0.25,
+            adaptive_perturbation_factor: 3.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::AlwaysNegative,
+            adaptive_perturbation_target: AdaptivePerturbationTarget::Posterior,
+            marginal_carry_damping_factor: 1.0,
+            ..SLGMBPDecoderConfig::default()
+        });
+        let posterior_initial = posterior_decoder.build_adaptive_initial_marginal(
+            &base_prior,
+            &posterior,
+            0.25,
+            false,
+        );
+        assert_eq!(posterior_initial, array![0.1 - add_val, 0.3, -0.249 - add_val]);
+
+        let both_decoder = make_decoder(SLGMBPDecoderConfig {
+            adaptive_perturbation: true,
+            adaptive_perturbation_llr_threshold: 0.25,
+            adaptive_perturbation_factor: 3.0,
+            adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::AlwaysNegative,
+            adaptive_perturbation_target: AdaptivePerturbationTarget::Both,
+            marginal_carry_damping_factor: 1.0,
+            ..SLGMBPDecoderConfig::default()
+        });
+        let both_prior = both_decoder.build_adaptive_prior(&base_prior, &posterior, 0.25);
+        let both_initial = both_decoder.build_adaptive_initial_marginal(
+            &base_prior,
+            &posterior,
+            0.25,
+            false,
+        );
+        assert_eq!(both_prior, array![1.0 - add_val, -2.0, 0.75 - add_val]);
+        assert_eq!(both_initial, array![0.1 - add_val, 0.3, -0.249 - add_val]);
     }
 
     #[test]

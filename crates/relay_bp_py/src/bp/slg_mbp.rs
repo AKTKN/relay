@@ -7,8 +7,9 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationThresholdMode,
-    GammaMode, InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptiveMemoryMode, AdaptivePerturbationSignMode, AdaptivePerturbationTarget,
+    AdaptivePerturbationThresholdMode, GammaMode, InitPerturbationMode, InitStrategy,
+    PerturbationMethod, SLGMBPDecoderConfig,
     SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
@@ -58,9 +59,12 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_factor=1.0,
         adaptive_perturbation_sign_mode="random".to_string(),
         adaptive_perturbation_positive_sign_prob=0.5,
+        adaptive_perturbation_target="prior".to_string(),
         continue_perturbation=false,
         perturbation_method="fixed".to_string(),
         reset_marginal=false,
+        marginal_carry_damping_factor=1.0,
+        marginal_carry_llr_abs_threshold=-1.0,
         drop_p=0.0,
         drop_llr_threshold=0.0,
         gamma_mode="fixed".to_string(),
@@ -116,9 +120,12 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_factor: f64,
         adaptive_perturbation_sign_mode: String,
         adaptive_perturbation_positive_sign_prob: f64,
+        adaptive_perturbation_target: String,
         continue_perturbation: bool,
         perturbation_method: String,
         reset_marginal: bool,
+        marginal_carry_damping_factor: f64,
+        marginal_carry_llr_abs_threshold: f64,
         drop_p: f64,
         drop_llr_threshold: f64,
         gamma_mode: String,
@@ -205,6 +212,15 @@ impl SLGMBPDecoderF64 {
                 _ => AdaptivePerturbationSignMode::Random,
             };
 
+        let adaptive_perturbation_target =
+            match adaptive_perturbation_target.to_ascii_lowercase().as_str() {
+                "posterior" | "marginal" | "posterior_marginal" => {
+                    AdaptivePerturbationTarget::Posterior
+                }
+                "both" => AdaptivePerturbationTarget::Both,
+                _ => AdaptivePerturbationTarget::Prior,
+            };
+
         let adaptive_perturbation_llr_threshold_mode =
             match adaptive_perturbation_llr_threshold_mode
                 .to_ascii_lowercase()
@@ -219,6 +235,20 @@ impl SLGMBPDecoderF64 {
         if !(0.0..=1.0).contains(&adaptive_perturbation_positive_sign_prob) {
             return Err(PyValueError::new_err(
                 "adaptive_perturbation_positive_sign_prob must be between 0.0 and 1.0",
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&marginal_carry_damping_factor) {
+            return Err(PyValueError::new_err(
+                "marginal_carry_damping_factor must be between 0.0 and 1.0",
+            ));
+        }
+
+        if marginal_carry_llr_abs_threshold < 0.0
+            && (marginal_carry_llr_abs_threshold + 1.0).abs() > f64::EPSILON
+        {
+            return Err(PyValueError::new_err(
+                "marginal_carry_llr_abs_threshold must be -1.0 (all variables) or >= 0.0",
             ));
         }
 
@@ -253,9 +283,12 @@ impl SLGMBPDecoderF64 {
             adaptive_perturbation_factor,
             adaptive_perturbation_sign_mode,
             adaptive_perturbation_positive_sign_prob,
+            adaptive_perturbation_target,
             continue_perturbation,
             perturbation_method,
             reset_marginal,
+            marginal_carry_damping_factor,
+            marginal_carry_llr_abs_threshold,
             drop_p,
             drop_llr_threshold,
             gamma_mode,

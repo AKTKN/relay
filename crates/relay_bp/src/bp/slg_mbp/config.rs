@@ -50,6 +50,13 @@ pub enum AdaptivePerturbationSignMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptivePerturbationTarget {
+    Prior,
+    Posterior,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdaptivePerturbationThresholdMode {
     Constant,
     GenerationLog10Iter,
@@ -94,9 +101,12 @@ pub struct SLGMBPDecoderConfig {
     pub adaptive_perturbation_factor: f64,
     pub adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode,
     pub adaptive_perturbation_positive_sign_prob: f64,
+    pub adaptive_perturbation_target: AdaptivePerturbationTarget,
     pub continue_perturbation: bool,
     pub perturbation_method: PerturbationMethod,
     pub reset_marginal: bool,
+    pub marginal_carry_damping_factor: f64,
+    pub marginal_carry_llr_abs_threshold: f64,
     pub drop_p: f64,
     pub drop_llr_threshold: f64,
     pub seed: u64,
@@ -147,9 +157,12 @@ impl Default for SLGMBPDecoderConfig {
             adaptive_perturbation_factor: 1.0,
             adaptive_perturbation_sign_mode: AdaptivePerturbationSignMode::Random,
             adaptive_perturbation_positive_sign_prob: 0.5,
+            adaptive_perturbation_target: AdaptivePerturbationTarget::Prior,
             continue_perturbation: false,
             perturbation_method: PerturbationMethod::Fixed,
             reset_marginal: false,
+            marginal_carry_damping_factor: 1.0,
+            marginal_carry_llr_abs_threshold: -1.0,
             drop_p: 0.0,
             drop_llr_threshold: 0.0,
             seed: 0,

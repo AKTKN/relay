@@ -261,6 +261,25 @@ def test_slg_mbp_decoder_accepts_adaptive_perturbation_sign_probability():
     assert observable_decoder is not None
 
 
+def test_slg_mbp_decoder_accepts_adaptive_perturbation_target_modes():
+    circuit = stim.Circuit.generated(
+        rounds=3,
+        distance=3,
+        after_clifford_depolarization=0.0001,
+        code_task=f"surface_code:rotated_memory_x",
+    )
+    dem = circuit.detector_error_model(decompose_errors=True)
+    check_matrices = CheckMatrices.from_dem(dem, decomposed_hyperedges=True)
+
+    for mode in ("prior", "posterior", "both"):
+        decoder = SinterDecoder_SLGMBP(
+            adaptive_perturbation=True,
+            adaptive_perturbation_target=mode,
+        )
+        observable_decoder = decoder.build_observable_decoder(check_matrices)
+        assert observable_decoder is not None
+
+
 def test_slg_mbp_decoder_accepts_dynamic_adaptive_perturbation_threshold_params():
     circuit = stim.Circuit.generated(
         rounds=3,
