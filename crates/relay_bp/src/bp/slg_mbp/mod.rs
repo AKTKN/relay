@@ -368,7 +368,27 @@ impl SLGMBPDecoder {
     }
 
     fn max_iter(&self) -> usize {
+        if self.config.biased_relay_mode {
+            return self.max_iter_biased_relay();
+        }
         self.config.t_ms + self.config.g_max * self.config.t_mem
+    }
+
+    fn max_iter_biased_relay(&self) -> usize {
+        self.config.biased_relay_maximum_round
+            * (self.config.biased_relay_t_0
+                + self.config.biased_relay_r_relay * self.config.biased_relay_r_relay_iter)
+    }
+
+    fn sample_relay_gamma(&self, n_variables: usize, rng: &mut StdRng) -> Array1<f64> {
+        let (a, b) = self.config.gamma_interval;
+        let lo = a.min(b);
+        let hi = a.max(b);
+        if (hi - lo).abs() < f64::EPSILON {
+            Array1::from_elem(n_variables, lo)
+        } else {
+            Array1::from_shape_simple_fn(n_variables, || rng.gen_range(lo..=hi))
+        }
     }
 
     fn estimated_error_weight(&self, decoding: &Array1<Bit>, prior_llr: &Array1<f64>) -> f64 {
@@ -495,6 +515,399 @@ impl SLGMBPDecoder {
             snapshots,
         })
     }
+
+    /// Biased-relay decode mode: combines adaptive perturbation (bias) with relay-bp
+    /// gamma resampling. Each "round" maps to one GA generation and consists of:
+    ///   (a) bias + constant mem-bp leg  (round ≥ 2; round 1 has no bias)
+    ///   (b) R_relay relay-bp legs with per-variable gamma resampling
+    #[allow(clippy::too_many_arguments)]
+    fn decode_detailed_biased_relay(
+        &mut self,
+        detectors: ArrayView1<'_, Bit>,
+        prior_llr: Array1<f64>,
+        mut members: Vec<PopulationMember>,
+        mut best_decoding: Array1<Bit>,
+        mut best_posterior: Array1<f64>,
+        mut best_fitness: f64,
+        phase1_iterations: usize,
+        initial_adaptive_threshold: f64,
+        mut rng: StdRng,
+    ) -> DecodeResult {
+        let max_iter = self.max_iter_biased_relay();
+        let mut total_iterations = phase1_iterations;
+        let mut generation_best_fitness = Vec::<f64>::new();
+        let mut gamma_history = Vec::<f64>::new();
+        let mut residual_weight_history = Vec::<usize>::new();
+        let mut adaptive_perturbation_llr_threshold = initial_adaptive_threshold;
+
+        // Round 1 relay legs (phase 1 constant mem-bp already ran as the init population).
+        // Now run R_relay relay-bp legs for each member, carrying marginals forward.
+        {
+            let mut round1_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
+            let mut round1_iterations = 0usize;
+
+            for member in members.iter_mut() {
+                let mut current_posterior = member.posterior.clone();
+                let mut relay_converged = false;
+                let mut last_decoding = Array1::<Bit>::zeros(prior_llr.len());
+                let mut member_iterations = 0usize;
+
+                for _relay_leg in 0..self.config.biased_relay_r_relay {
+                    let relay_gamma = self.sample_relay_gamma(prior_llr.len(), &mut rng);
+
+                    let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                        detectors,
+                        &prior_llr,
+                        &current_posterior,
+                        &relay_gamma,
+                        self.config.biased_relay_r_relay_iter,
+                        false, // relay legs always carry marginals forward
+                        self.config.drop_p > 0.0,
+                        self.next_drop_seed(&mut rng),
+                    );
+
+                    member_iterations += iters;
+                    current_posterior = posterior.clone();
+                    last_decoding = decoding.clone();
+
+                    if success {
+                        let solution_llr_cost = self.estimated_error_weight(&decoding, &prior_llr);
+                        let replace = match round1_success {
+                            None => true,
+                            Some((best_iter, best_llr_cost, _, _)) => {
+                                member_iterations < best_iter
+                                    || (member_iterations == best_iter
+                                        && solution_llr_cost < best_llr_cost)
+                            }
+                        };
+                        if replace {
+                            round1_success = Some((
+                                member_iterations,
+                                solution_llr_cost,
+                                decoding.clone(),
+                                posterior.clone(),
+                            ));
+                        }
+                        relay_converged = true;
+                        break;
+                    }
+                }
+
+                // Score member using final posterior (after all relay legs).
+                let decoded_detectors_final = self.get_detectors(last_decoding.view());
+                let residual_w = residual_weight(&decoded_detectors_final, detectors);
+                let fitness = fitness_from_final_marginal(
+                    residual_w,
+                    &current_posterior,
+                    self.config.fitness_alpha,
+                    self.config.fitness_beta,
+                    self.config.fitness_low_llr_mu,
+                    self.config.fitness_low_llr_threshold,
+                );
+                residual_weight_history.push(residual_w);
+
+                if fitness > best_fitness {
+                    best_fitness = fitness;
+                    best_decoding = last_decoding.clone();
+                    best_posterior = current_posterior.clone();
+                }
+
+                member.posterior = current_posterior;
+                member.fitness = fitness;
+
+                round1_iterations += member_iterations;
+
+                if relay_converged {
+                    break;
+                }
+            }
+
+            let round1_gamma_mean = self.config.init_gamma;
+            gamma_history.push(round1_gamma_mean);
+
+            if let Some((_, _, r1_decoding, r1_posterior)) = round1_success {
+                total_iterations += round1_iterations;
+                return DecodeResult {
+                    decoding: r1_decoding.clone(),
+                    decoded_detectors: self.get_detectors(r1_decoding.view()),
+                    posterior_ratios: r1_posterior.clone(),
+                    success: true,
+                    decoding_quality: self.get_decoding_quality(r1_decoding.view()),
+                    iterations: total_iterations,
+                    max_iter,
+                    extra: BPExtraResult::SLGMBPTrace {
+                        phase1_converged: false,
+                        phase1_iterations,
+                        total_iterations,
+                        generation_count: gamma_history.len(),
+                        generation_best_fitness,
+                        selected_solution_posterior: Some(r1_posterior),
+                        residual_weight_history,
+                        gamma_history,
+                        detailed_dynamics: None,
+                        score_spike_trace: None,
+                    },
+                };
+            }
+
+            total_iterations += round1_iterations;
+            let gen_best = members.iter().map(|m| m.fitness).fold(f64::NEG_INFINITY, f64::max);
+            generation_best_fitness.push(gen_best);
+        }
+
+        // Rounds 2..maximum_round: bias + constant mem-bp + R_relay relay legs.
+        for _round in 1..self.config.biased_relay_maximum_round {
+            let children = build_next_generation(
+                &members,
+                self.config.elite_count,
+                self.config.sequential_mc,
+                self.config.mutation_rate,
+                self.config.mutation_llr_abs_threshold,
+                self.config.selection_mode,
+                self.config.weighted_selection_mode,
+                self.config.perturbation_method,
+                self.config.tournament_size,
+                &mut rng,
+            );
+
+            let mut next_members = Vec::<PopulationMember>::with_capacity(children.len());
+            let mut gen_best = f64::NEG_INFINITY;
+            let mut generation_iterations = 0usize;
+            let mut generation_max_iters = 0usize;
+            let mut generation_success: Option<(usize, f64, Array1<Bit>, Array1<f64>)> = None;
+            let mut gen_best_gamma_mean = 0.0f64;
+
+            for mut child in children {
+                let mut child_iterations = 0usize;
+                // (a) Build biased prior from the base prior + child's posterior.
+                let biased_prior = self.build_adaptive_prior(
+                    &prior_llr,
+                    &child.posterior,
+                    adaptive_perturbation_llr_threshold,
+                );
+
+                // Apply perturbation on top of biased prior if continue_perturbation is set.
+                let phase_prior = if self.config.continue_perturbation {
+                    if self.config.sequential_mc
+                        || self.config.perturbation_method == PerturbationMethod::Resample
+                        || matches!(child.perturbation_state, PerturbationState::None)
+                    {
+                        child.perturbation_state = sample_perturbation_state(
+                            biased_prior.len(),
+                            self.config.init_perturbation_mode,
+                            self.config.sigma2,
+                            self.config.delta,
+                            &mut rng,
+                        );
+                    }
+                    apply_perturbation_state(&biased_prior, &child.perturbation_state)
+                } else {
+                    biased_prior
+                };
+
+                // (b) Constant mem-bp leg with init_gamma.
+                let constant_gamma =
+                    Array1::from_elem(prior_llr.len(), self.config.init_gamma);
+
+                let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
+                    detectors,
+                    &phase_prior,
+                    &child.posterior,
+                    &constant_gamma,
+                    self.config.biased_relay_t_0,
+                    self.config.reset_marginal,
+                    self.config.drop_p > 0.0,
+                    self.next_drop_seed(&mut rng),
+                );
+
+                child_iterations += iters;
+                generation_max_iters = generation_max_iters.max(iters);
+
+                if success {
+                    let solution_llr_cost = self.estimated_error_weight(&decoding, &prior_llr);
+                    let replace = match generation_success {
+                        None => true,
+                        Some((best_iter, best_llr_cost, _, _)) => {
+                            child_iterations < best_iter
+                                || (child_iterations == best_iter
+                                    && solution_llr_cost < best_llr_cost)
+                        }
+                    };
+                    if replace {
+                        generation_success = Some((
+                            child_iterations,
+                            solution_llr_cost,
+                            decoding.clone(),
+                            posterior.clone(),
+                        ));
+                    }
+
+                    {
+                        let const_fitness = fitness_from_final_marginal(
+                            residual_weight(&self.get_detectors(decoding.view()), detectors),
+                            &posterior,
+                            self.config.fitness_alpha,
+                            self.config.fitness_beta,
+                            self.config.fitness_low_llr_mu,
+                            self.config.fitness_low_llr_threshold,
+                        );
+                        if const_fitness > best_fitness {
+                            best_fitness = const_fitness;
+                            best_decoding = decoding.clone();
+                            best_posterior = posterior.clone();
+                        }
+                    }
+
+                    // On constant-leg convergence, skip relay legs for this member.
+                    generation_iterations += child_iterations;
+                    continue;
+                }
+
+                // (c) R_relay relay-bp legs carrying marginals forward.
+                let mut current_posterior = posterior;
+                let mut relay_converged = false;
+                let mut last_relay_decoding = decoding;
+
+                for _relay_leg in 0..self.config.biased_relay_r_relay {
+                    let relay_gamma = self.sample_relay_gamma(prior_llr.len(), &mut rng);
+
+                    let (relay_dec, relay_post, relay_iters, relay_success) =
+                        self.run_mem_bp_phase(
+                            detectors,
+                            &phase_prior,
+                            &current_posterior,
+                            &relay_gamma,
+                            self.config.biased_relay_r_relay_iter,
+                            false, // relay legs always carry marginals
+                            self.config.drop_p > 0.0,
+                            self.next_drop_seed(&mut rng),
+                        );
+
+                    child_iterations += relay_iters;
+                    generation_max_iters = generation_max_iters.max(relay_iters);
+                    current_posterior = relay_post.clone();
+                    last_relay_decoding = relay_dec.clone();
+
+                    if relay_success {
+                        let solution_llr_cost =
+                            self.estimated_error_weight(&relay_dec, &prior_llr);
+                        let replace = match generation_success {
+                            None => true,
+                            Some((best_iter, best_llr_cost, _, _)) => {
+                                child_iterations < best_iter
+                                    || (child_iterations == best_iter
+                                        && solution_llr_cost < best_llr_cost)
+                            }
+                        };
+                        if replace {
+                            generation_success = Some((
+                                child_iterations,
+                                solution_llr_cost,
+                                relay_dec.clone(),
+                                relay_post.clone(),
+                            ));
+                        }
+                        relay_converged = true;
+                        break;
+                    }
+                }
+
+                // Score member using final posterior (after all relay legs).
+                let decoded_for_score = self.get_detectors(last_relay_decoding.view());
+                let member_residual = residual_weight(&decoded_for_score, detectors);
+                let member_fitness = fitness_from_final_marginal(
+                    member_residual,
+                    &current_posterior,
+                    self.config.fitness_alpha,
+                    self.config.fitness_beta,
+                    self.config.fitness_low_llr_mu,
+                    self.config.fitness_low_llr_threshold,
+                );
+                residual_weight_history.push(member_residual);
+                gen_best = gen_best.max(member_fitness);
+
+                if member_fitness > best_fitness {
+                    best_fitness = member_fitness;
+                    best_decoding = last_relay_decoding.clone();
+                    best_posterior = current_posterior.clone();
+                }
+
+                gen_best_gamma_mean = self.config.init_gamma;
+
+                generation_iterations += child_iterations;
+
+                if relay_converged {
+                    break;
+                }
+
+                next_members.push(PopulationMember {
+                    posterior: current_posterior,
+                    fitness: member_fitness,
+                    perturbation_state: child.perturbation_state,
+                    residual_adjacent_variable_indices: Vec::new(),
+                });
+            }
+
+            gamma_history.push(gen_best_gamma_mean);
+
+            if let Some((_, _, gen_dec, gen_post)) = generation_success {
+                total_iterations += generation_iterations;
+                generation_best_fitness.push(gen_best);
+                return DecodeResult {
+                    decoding: gen_dec.clone(),
+                    decoded_detectors: self.get_detectors(gen_dec.view()),
+                    posterior_ratios: gen_post.clone(),
+                    success: true,
+                    decoding_quality: self.get_decoding_quality(gen_dec.view()),
+                    iterations: total_iterations,
+                    max_iter,
+                    extra: BPExtraResult::SLGMBPTrace {
+                        phase1_converged: false,
+                        phase1_iterations,
+                        total_iterations,
+                        generation_count: gamma_history.len(),
+                        generation_best_fitness,
+                        selected_solution_posterior: Some(gen_post),
+                        residual_weight_history,
+                        gamma_history,
+                        detailed_dynamics: None,
+                        score_spike_trace: None,
+                    },
+                };
+            }
+
+            total_iterations += generation_iterations;
+            generation_best_fitness.push(gen_best);
+            adaptive_perturbation_llr_threshold = self.next_adaptive_perturbation_llr_threshold(
+                adaptive_perturbation_llr_threshold,
+                generation_max_iters,
+            );
+            members = next_members;
+        }
+
+        // No convergence after all rounds.
+        DecodeResult {
+            decoding: best_decoding.clone(),
+            decoded_detectors: self.get_detectors(best_decoding.view()),
+            posterior_ratios: best_posterior.clone(),
+            success: false,
+            decoding_quality: self.get_decoding_quality(best_decoding.view()),
+            iterations: total_iterations,
+            max_iter,
+            extra: BPExtraResult::SLGMBPTrace {
+                phase1_converged: false,
+                phase1_iterations,
+                total_iterations,
+                generation_count: gamma_history.len(),
+                generation_best_fitness,
+                selected_solution_posterior: Some(best_posterior),
+                residual_weight_history,
+                gamma_history,
+                detailed_dynamics: None,
+                score_spike_trace: None,
+            },
+        }
+    }
 }
 
 impl Decoder for SLGMBPDecoder {
@@ -552,12 +965,17 @@ impl Decoder for SLGMBPDecoder {
                 }
                 InitStrategy::MemBp => {
                     let gamma_vec = Array1::from_elem(prior_llr.len(), self.config.init_gamma);
+                    let phase1_t = if self.config.biased_relay_mode {
+                        self.config.biased_relay_t_0
+                    } else {
+                        self.config.t_ms
+                    };
                     let (decoding, posterior, iters, success) = self.run_mem_bp_phase(
                         detectors,
                         &prior_llr,
                         init_llr,
                         &gamma_vec,
-                        self.config.t_ms,
+                        phase1_t,
                         false,
                         false,
                         None,
@@ -641,6 +1059,21 @@ impl Decoder for SLGMBPDecoder {
                     score_spike_trace: None,
                 },
             };
+        }
+
+        // Branch: biased_relay mode uses a completely different generational loop.
+        if self.config.biased_relay_mode {
+            return self.decode_detailed_biased_relay(
+                detectors,
+                prior_llr,
+                members,
+                best_decoding,
+                best_posterior,
+                best_fitness,
+                phase1_iterations,
+                adaptive_perturbation_llr_threshold,
+                rng,
+            );
         }
 
         let mut total_iterations = phase1_iterations;

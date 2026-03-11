@@ -100,6 +100,11 @@ pub struct SLGMBPDecoderConfig {
     pub drop_p: f64,
     pub drop_llr_threshold: f64,
     pub seed: u64,
+    pub biased_relay_mode: bool,
+    pub biased_relay_r_relay: usize,
+    pub biased_relay_maximum_round: usize,
+    pub biased_relay_t_0: usize,
+    pub biased_relay_r_relay_iter: usize,
 }
 
 impl Default for SLGMBPDecoderConfig {
@@ -148,6 +153,11 @@ impl Default for SLGMBPDecoderConfig {
             drop_p: 0.0,
             drop_llr_threshold: 0.0,
             seed: 0,
+            biased_relay_mode: false,
+            biased_relay_r_relay: 10,
+            biased_relay_maximum_round: 10,
+            biased_relay_t_0: 80,
+            biased_relay_r_relay_iter: 60,
         }
     }
 }

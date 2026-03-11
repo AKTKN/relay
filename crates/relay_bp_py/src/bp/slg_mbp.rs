@@ -70,6 +70,11 @@ impl SLGMBPDecoderF64 {
         adaptive_memory_zeta=1.0,
         adaptive_memory_adjacent_gamma_interval=(0.0, 0.25),
         adaptive_memory_mode="probabilistic_flip".to_string(),
+        biased_relay_mode=false,
+        biased_relay_r_relay=10,
+        biased_relay_maximum_round=10,
+        biased_relay_t_0=80,
+        biased_relay_r_relay_iter=60,
         seed=0
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -123,6 +128,11 @@ impl SLGMBPDecoderF64 {
         adaptive_memory_zeta: f64,
         adaptive_memory_adjacent_gamma_interval: (f64, f64),
         adaptive_memory_mode: String,
+        biased_relay_mode: bool,
+        biased_relay_r_relay: usize,
+        biased_relay_maximum_round: usize,
+        biased_relay_t_0: usize,
+        biased_relay_r_relay_iter: usize,
         seed: u64,
     ) -> PyResult<(Self, DynDecoder)> {
         let decoder = Self {};
@@ -255,6 +265,11 @@ impl SLGMBPDecoderF64 {
             adaptive_memory_zeta,
             adaptive_memory_adjacent_gamma_interval,
             adaptive_memory_mode,
+            biased_relay_mode,
+            biased_relay_r_relay,
+            biased_relay_maximum_round,
+            biased_relay_t_0,
+            biased_relay_r_relay_iter,
             seed,
         };
 

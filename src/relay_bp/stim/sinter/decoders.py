@@ -446,6 +446,11 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
         adaptive_memory_zeta: float = 1.0,
         adaptive_memory_adjacent_gamma_interval: tuple[float, float] = (0.0, 0.25),
         adaptive_memory_mode: str = "probabilistic_flip",
+        biased_relay_mode: bool = False,
+        biased_relay_r_relay: int = 10,
+        biased_relay_maximum_round: int = 10,
+        biased_relay_t_0: int = 80,
+        biased_relay_r_relay_iter: int = 60,
         tournament_size: int = 3,
         elite_count: int = 2,
         seed: int = 0,
@@ -512,6 +517,11 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             adaptive_memory_adjacent_gamma_interval
         )
         self.adaptive_memory_mode = adaptive_memory_mode
+        self.biased_relay_mode = biased_relay_mode
+        self.biased_relay_r_relay = biased_relay_r_relay
+        self.biased_relay_maximum_round = biased_relay_maximum_round
+        self.biased_relay_t_0 = biased_relay_t_0
+        self.biased_relay_r_relay_iter = biased_relay_r_relay_iter
         self.tournament_size = tournament_size
         self.elite_count = elite_count
         self.seed = seed
@@ -570,6 +580,11 @@ class SinterDecoder_SLGMBP(SinterDecoder_BaseBP):
             adaptive_memory_zeta=self.adaptive_memory_zeta,
             adaptive_memory_adjacent_gamma_interval=self.adaptive_memory_adjacent_gamma_interval,
             adaptive_memory_mode=self.adaptive_memory_mode,
+            biased_relay_mode=self.biased_relay_mode,
+            biased_relay_r_relay=self.biased_relay_r_relay,
+            biased_relay_maximum_round=self.biased_relay_maximum_round,
+            biased_relay_t_0=self.biased_relay_t_0,
+            biased_relay_r_relay_iter=self.biased_relay_r_relay_iter,
             tournament_size=self.tournament_size,
             elite_count=self.elite_count,
             seed=self.seed,
