@@ -13,6 +13,7 @@ pub struct PopulationMember {
     pub fitness: f64,
     pub perturbation_state: PerturbationState,
     pub residual_adjacent_variable_indices: Vec<usize>,
+    pub adaptive_prior: Option<Array1<f64>>,
 }
 
 pub fn build_next_generation(
@@ -96,6 +97,11 @@ pub fn build_next_generation(
             fitness: 0.0,
             perturbation_state: inherited_perturbation_state,
             residual_adjacent_variable_indices: inherited_adjacent.into_iter().collect(),
+            adaptive_prior: if rng.gen_bool(0.5) {
+                pa.adaptive_prior.clone()
+            } else {
+                pb.adaptive_prior.clone()
+            },
         });
     }
 
@@ -123,6 +129,7 @@ fn build_next_generation_sequential_mc(
             residual_adjacent_variable_indices: population[idx]
                 .residual_adjacent_variable_indices
                 .clone(),
+            adaptive_prior: population[idx].adaptive_prior.clone(),
         });
     }
 
@@ -147,6 +154,7 @@ fn build_next_generation_sequential_mc(
                 residual_adjacent_variable_indices: population[idx]
                     .residual_adjacent_variable_indices
                     .clone(),
+                adaptive_prior: population[idx].adaptive_prior.clone(),
             });
         }
         if children.len() >= m {
