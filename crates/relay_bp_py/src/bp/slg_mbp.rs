@@ -8,8 +8,9 @@ use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
     AdaptiveMemoryMode, AdaptivePerturbationPriorBaseMode, AdaptivePerturbationSignMode,
-    AdaptivePerturbationTarget, AdaptivePerturbationThresholdMode, GammaMode,
-    InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptivePerturbationTarget, AdaptivePerturbationThresholdMode,
+    AdaptivePerturbationVariableBaseMode, GammaMode, InitPerturbationMode, InitStrategy,
+    PerturbationMethod, SLGMBPDecoderConfig,
     SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
@@ -61,6 +62,7 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_positive_sign_prob=0.5,
         adaptive_perturbation_target="prior".to_string(),
         adaptive_perturbation_prior_base_mode="initial".to_string(),
+        adaptive_perturbation_variable_base_mode="previous_leg_posterior".to_string(),
         adaptive_perturbation_reset_on_threshold_exit=false,
         continue_perturbation=false,
         perturbation_method="fixed".to_string(),
@@ -124,6 +126,7 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_positive_sign_prob: f64,
         adaptive_perturbation_target: String,
         adaptive_perturbation_prior_base_mode: String,
+        adaptive_perturbation_variable_base_mode: String,
         adaptive_perturbation_reset_on_threshold_exit: bool,
         continue_perturbation: bool,
         perturbation_method: String,
@@ -236,6 +239,20 @@ impl SLGMBPDecoderF64 {
                 _ => AdaptivePerturbationPriorBaseMode::Initial,
             };
 
+        let adaptive_perturbation_variable_base_mode =
+            match adaptive_perturbation_variable_base_mode
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "first_leg_posterior_fixed"
+                | "first_leg_fixed"
+                | "first_leg"
+                | "fixed_first_leg" => {
+                    AdaptivePerturbationVariableBaseMode::FirstLegPosteriorFixed
+                }
+                _ => AdaptivePerturbationVariableBaseMode::PreviousLegPosterior,
+            };
+
         let adaptive_perturbation_llr_threshold_mode =
             match adaptive_perturbation_llr_threshold_mode
                 .to_ascii_lowercase()
@@ -300,6 +317,7 @@ impl SLGMBPDecoderF64 {
             adaptive_perturbation_positive_sign_prob,
             adaptive_perturbation_target,
             adaptive_perturbation_prior_base_mode,
+            adaptive_perturbation_variable_base_mode,
             adaptive_perturbation_reset_on_threshold_exit,
             continue_perturbation,
             perturbation_method,

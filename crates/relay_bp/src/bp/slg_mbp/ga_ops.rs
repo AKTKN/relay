@@ -14,6 +14,7 @@ pub struct PopulationMember {
     pub perturbation_state: PerturbationState,
     pub residual_adjacent_variable_indices: Vec<usize>,
     pub adaptive_prior: Option<Array1<f64>>,
+    pub adaptive_target_mask: Option<Vec<bool>>,
 }
 
 pub fn build_next_generation(
@@ -102,6 +103,11 @@ pub fn build_next_generation(
             } else {
                 pb.adaptive_prior.clone()
             },
+            adaptive_target_mask: if rng.gen_bool(0.5) {
+                pa.adaptive_target_mask.clone()
+            } else {
+                pb.adaptive_target_mask.clone()
+            },
         });
     }
 
@@ -130,6 +136,7 @@ fn build_next_generation_sequential_mc(
                 .residual_adjacent_variable_indices
                 .clone(),
             adaptive_prior: population[idx].adaptive_prior.clone(),
+            adaptive_target_mask: population[idx].adaptive_target_mask.clone(),
         });
     }
 
@@ -155,6 +162,7 @@ fn build_next_generation_sequential_mc(
                     .residual_adjacent_variable_indices
                     .clone(),
                 adaptive_prior: population[idx].adaptive_prior.clone(),
+                adaptive_target_mask: population[idx].adaptive_target_mask.clone(),
             });
         }
         if children.len() >= m {

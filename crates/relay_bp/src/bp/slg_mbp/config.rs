@@ -63,6 +63,12 @@ pub enum AdaptivePerturbationPriorBaseMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptivePerturbationVariableBaseMode {
+    PreviousLegPosterior,
+    FirstLegPosteriorFixed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdaptivePerturbationThresholdMode {
     Constant,
     GenerationLog10Iter,
@@ -109,6 +115,7 @@ pub struct SLGMBPDecoderConfig {
     pub adaptive_perturbation_positive_sign_prob: f64,
     pub adaptive_perturbation_target: AdaptivePerturbationTarget,
     pub adaptive_perturbation_prior_base_mode: AdaptivePerturbationPriorBaseMode,
+    pub adaptive_perturbation_variable_base_mode: AdaptivePerturbationVariableBaseMode,
     pub adaptive_perturbation_reset_on_threshold_exit: bool,
     pub continue_perturbation: bool,
     pub perturbation_method: PerturbationMethod,
@@ -167,6 +174,8 @@ impl Default for SLGMBPDecoderConfig {
             adaptive_perturbation_positive_sign_prob: 0.5,
             adaptive_perturbation_target: AdaptivePerturbationTarget::Prior,
             adaptive_perturbation_prior_base_mode: AdaptivePerturbationPriorBaseMode::Initial,
+            adaptive_perturbation_variable_base_mode:
+                AdaptivePerturbationVariableBaseMode::PreviousLegPosterior,
             adaptive_perturbation_reset_on_threshold_exit: false,
             continue_perturbation: false,
             perturbation_method: PerturbationMethod::Fixed,

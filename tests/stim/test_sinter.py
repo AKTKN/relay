@@ -324,6 +324,27 @@ def test_slg_mbp_decoder_accepts_adaptive_prior_carry_and_reset_options():
     assert observable_decoder is not None
 
 
+def test_slg_mbp_decoder_accepts_first_leg_fixed_adaptive_variable_mode():
+    circuit = stim.Circuit.generated(
+        rounds=3,
+        distance=3,
+        after_clifford_depolarization=0.0001,
+        code_task=f"surface_code:rotated_memory_x",
+    )
+    dem = circuit.detector_error_model(decompose_errors=True)
+    check_matrices = CheckMatrices.from_dem(dem, decomposed_hyperedges=True)
+
+    decoder = SinterDecoder_SLGMBP(
+        adaptive_perturbation=True,
+        adaptive_perturbation_target="prior",
+        adaptive_perturbation_variable_base_mode="first_leg_posterior_fixed",
+        adaptive_perturbation_sign_mode="random",
+    )
+    observable_decoder = decoder.build_observable_decoder(check_matrices)
+
+    assert observable_decoder is not None
+
+
 def test_get_testdata_circuit():
     """Test getting test circuit and decoding."""
     circuit = get_test_circuit("bicycle_bivariate_18_4_3_memory_Z", 0.001)
