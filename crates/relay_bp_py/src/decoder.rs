@@ -183,6 +183,14 @@ impl DecodeResult {
     }
 
     #[getter]
+    pub fn converged(&self) -> bool {
+        match &self.inner.extra {
+            BPExtraResult::LBFTrace { converged } => *converged,
+            _ => self.inner.success,
+        }
+    }
+
+    #[getter]
     pub fn iterations(&self) -> usize {
         self.inner.iterations
     }
@@ -190,6 +198,37 @@ impl DecodeResult {
     #[getter]
     pub fn max_iter(&self) -> usize {
         self.inner.max_iter
+    }
+
+    #[getter]
+    pub fn adaptive_relay_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::AdaptiveRelayTrace {
+                executed_members,
+                winner_member_index,
+                member_success,
+                member_discovery_iterations,
+                member_total_iterations,
+                leg_iterations,
+                gamma_history,
+                clamp_applied_count,
+            } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("executed_members", executed_members)?;
+                dict.set_item("winner_member_index", winner_member_index)?;
+                dict.set_item("member_success", member_success.clone())?;
+                dict.set_item(
+                    "member_discovery_iterations",
+                    member_discovery_iterations.clone(),
+                )?;
+                dict.set_item("member_total_iterations", member_total_iterations.clone())?;
+                dict.set_item("leg_iterations", leg_iterations.clone())?;
+                dict.set_item("gamma_history", gamma_history.clone())?;
+                dict.set_item("clamp_applied_count", clamp_applied_count)?;
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
     }
 
     #[getter]
@@ -232,6 +271,107 @@ impl DecodeResult {
     }
 
     #[getter]
+    pub fn disordered_bp_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::DisorderedBPTrace {
+                leg_success,
+                leg_iterations,
+                leg_negative_llr_counts,
+                leg_decodings,
+                leg_posteriors,
+                leg_alpha_means,
+                leg_gamma_means,
+                leg_bias_means,
+                leg_bias_applied_counts,
+            } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("leg_success", leg_success.clone())?;
+                dict.set_item("leg_iterations", leg_iterations.clone())?;
+                dict.set_item("leg_negative_llr_counts", leg_negative_llr_counts.clone())?;
+                dict.set_item("leg_alpha_means", leg_alpha_means.clone())?;
+                dict.set_item("leg_gamma_means", leg_gamma_means.clone())?;
+                dict.set_item("leg_bias_means", leg_bias_means.clone())?;
+                dict.set_item("leg_bias_applied_counts", leg_bias_applied_counts.clone())?;
+
+                let py_decodings = pyo3::types::PyList::empty(py);
+                for arr in leg_decodings {
+                    py_decodings.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_decodings", py_decodings)?;
+
+                let py_posteriors = pyo3::types::PyList::empty(py);
+                for arr in leg_posteriors {
+                    py_posteriors.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_posteriors", py_posteriors)?;
+
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
+
+    #[getter]
+    pub fn dual_relay_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::DualRelayTrace {
+                leg_success,
+                leg_iterations,
+                leg_negative_llr_counts,
+                leg_decodings,
+                leg_posteriors,
+                slow_success_count,
+                fast_success_count,
+                joint_success_count,
+                naive_average_applied_count,
+                weighted_fast_disagreement_applied_count,
+                unique_solution_count,
+            } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("leg_success", leg_success.clone())?;
+                dict.set_item("leg_iterations", leg_iterations.clone())?;
+                dict.set_item("leg_negative_llr_counts", leg_negative_llr_counts.clone())?;
+                dict.set_item("slow_success_count", slow_success_count)?;
+                dict.set_item("fast_success_count", fast_success_count)?;
+                dict.set_item("joint_success_count", joint_success_count)?;
+                dict.set_item("naive_average_applied_count", naive_average_applied_count)?;
+                dict.set_item(
+                    "weighted_fast_disagreement_applied_count",
+                    weighted_fast_disagreement_applied_count,
+                )?;
+                dict.set_item("unique_solution_count", unique_solution_count)?;
+
+                let py_decodings = pyo3::types::PyList::empty(py);
+                for arr in leg_decodings {
+                    py_decodings.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_decodings", py_decodings)?;
+
+                let py_posteriors = pyo3::types::PyList::empty(py);
+                for arr in leg_posteriors {
+                    py_posteriors.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("leg_posteriors", py_posteriors)?;
+
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
+
+    #[getter]
+    pub fn lbf_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.extra {
+            BPExtraResult::LBFTrace { converged } => {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("converged", converged)?;
+                Ok(dict.into_any())
+            }
+            _ => Ok(py.None().into_bound(py).into_any()),
+        }
+    }
+
+    #[getter]
     pub fn slg_mbp_trace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.inner.extra {
             BPExtraResult::SLGMBPTrace {
@@ -241,6 +381,9 @@ impl DecodeResult {
                 generation_count,
                 generation_best_fitness,
                 selected_solution_posterior,
+                accepted_solution_decodings,
+                accepted_solution_weights,
+                accepted_solution_discovery_iterations,
                 residual_weight_history,
                 gamma_history,
                 detailed_dynamics: _,
@@ -263,6 +406,17 @@ impl DecodeResult {
                 } else {
                     dict.set_item("selected_solution_posterior", py.None())?;
                 }
+
+                let py_decodings = pyo3::types::PyList::empty(py);
+                for arr in accepted_solution_decodings {
+                    py_decodings.append(PyArray1::from_array(py, arr))?;
+                }
+                dict.set_item("accepted_solution_decodings", py_decodings)?;
+                dict.set_item("accepted_solution_weights", accepted_solution_weights.clone())?;
+                dict.set_item(
+                    "accepted_solution_discovery_iterations",
+                    accepted_solution_discovery_iterations.clone(),
+                )?;
 
                 if let Some(trace) = score_spike_trace {
                     dict.set_item("score_spike_trace", slg_mbp_score_spike_trace_to_py(py, trace)?)?;

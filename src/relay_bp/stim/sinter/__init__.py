@@ -13,10 +13,14 @@ from .check_matrices import (
     CheckMatrices,
 )
 from .decoders import (
+    SinterDecoder_AdaptiveRelay,
+    SinterDecoder_DisorderedBP,
+    SinterDecoder_DualRelay,
     SinterDecoder_LRBP,
     SinterDecoder_MemBP,
     SinterDecoder_MSLBP,
     SinterDecoder_SLGMBP,
     SinterDecoder_RelayBP,
+    SinterDecoder_LBF,
     sinter_decoders,
 )

@@ -12,4 +12,8 @@ pub mod min_sum;
 pub mod min_sum_fixed;
 pub mod lrbp;
 pub mod relay;
+pub mod adaptive_relay;
 pub mod slg_mbp;
+pub mod disordered_bp;
+pub mod dual_relay;
+pub mod lbf;

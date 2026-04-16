@@ -16,6 +16,7 @@ use ndarray::{stack, Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 pub trait ObservableDecoder: Decoder {
     /// The logical action matrix of the underlying trait.
@@ -71,11 +72,16 @@ impl<'a> ObservableDecoderRunner<'a> {
     ) -> ObservableDecodeResult {
         let decode_result = self.decode_detailed(detectors.view());
         let observables = self.compute_observables(decode_result.decoding.view());
+        let converged = self.detailed_converged(&decode_result);
+        let force_logical_error = self.force_logical_error(&decode_result);
+        let confidence_score_token = self.compute_confidence_score_token(&decode_result);
 
         ObservableDecodeResult {
             observables,
-            converged: decode_result.success,
+            converged,
             iterations: decode_result.iterations,
+            force_logical_error,
+            confidence_score_token,
             true_decoding: None,
             physical_decode_result: if self.include_decode_result {
                 Some(decode_result)
@@ -226,6 +232,9 @@ impl<'a> ObservableDecoderRunner<'a> {
         let decode_result = self.decode_detailed(detectors.view());
         let observables = self.compute_observables(errors);
         let decoded_observables = self.compute_observables(decode_result.decoding.view());
+        let converged = self.detailed_converged(&decode_result);
+        let force_logical_error = self.force_logical_error(&decode_result);
+        let confidence_score_token = self.compute_confidence_score_token(&decode_result);
 
         let error_detected: bool = observables != decoded_observables;
         let error_mismatch_detected: bool = errors != decode_result.decoding;
@@ -238,8 +247,10 @@ impl<'a> ObservableDecoderRunner<'a> {
 
         ObservableDecodeResult {
             observables,
-            converged: decode_result.success,
+            converged,
             iterations: decode_result.iterations,
+            force_logical_error,
+            confidence_score_token,
             true_decoding: Some(TrueDecodingResults {
                 error_detected,
                 error_mismatch_detected,
@@ -255,6 +266,31 @@ impl<'a> ObservableDecoderRunner<'a> {
         }
     }
 
+
+    fn accepted_solution_count(&self, decode_result: &DecodeResult) -> usize {
+        match &decode_result.extra {
+            crate::decoder::BPExtraResult::SLGMBPTrace {
+                accepted_solution_decodings,
+                accepted_solution_weights,
+                ..
+            } if accepted_solution_decodings.len() == accepted_solution_weights.len() => {
+                accepted_solution_decodings.len()
+            }
+            _ => 0,
+        }
+    }
+
+    fn detailed_converged(&self, decode_result: &DecodeResult) -> bool {
+        match &decode_result.extra {
+            crate::decoder::BPExtraResult::LBFTrace { converged } => *converged,
+            _ => decode_result.success,
+        }
+    }
+
+    fn force_logical_error(&self, decode_result: &DecodeResult) -> bool {
+        // If decode is unconverged and no accepted solution exists, force logical error.
+        !decode_result.success && self.accepted_solution_count(decode_result) == 0
+    }
     pub fn from_errors_decode_observables_batch(&mut self, errors: ArrayView2<Bit>) -> Array2<Bit> {
         let arrs: Vec<Array1<Bit>> = errors
             .axis_iter(Axis(0))
@@ -388,6 +424,85 @@ impl<'a> ObservableDecoderRunner<'a> {
     fn get_progress_bar_style(&self) -> ProgressStyle {
         ProgressStyle::default_bar().template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({per_sec}, {eta})").unwrap()
     }
+
+    fn compute_confidence_score_token(&self, decode_result: &DecodeResult) -> Option<String> {
+        if !decode_result.success {
+            // Non-converged shots must use score=0 so they don't collide with true inf-gap cases.
+            return Some("0.0".to_string());
+        }
+
+        let (accepted_decodings, accepted_weights) = match &decode_result.extra {
+            crate::decoder::BPExtraResult::SLGMBPTrace {
+                accepted_solution_decodings,
+                accepted_solution_weights,
+                ..
+            } if !accepted_solution_decodings.is_empty()
+                && accepted_solution_decodings.len() == accepted_solution_weights.len() =>
+            {
+                (accepted_solution_decodings, accepted_solution_weights)
+            }
+            _ => return None,
+        };
+
+        // Group by logical class: observables commutation pattern.
+        let mut class_min_weight = HashMap::<Vec<Bit>, f64>::new();
+        for (decoding, &weight) in accepted_decodings.iter().zip(accepted_weights.iter()) {
+            let logical_class = self.compute_observables(decoding.view()).to_vec();
+            class_min_weight
+                .entry(logical_class)
+                .and_modify(|w| {
+                    if weight < *w {
+                        *w = weight;
+                    }
+                })
+                .or_insert(weight);
+        }
+
+        if class_min_weight.len() >= 2 {
+            let mut mins = class_min_weight.values().copied().collect::<Vec<_>>();
+            mins.sort_by(|a, b| a.total_cmp(b));
+            let gap = mins[1] - mins[0];
+            return Some(Self::format_numeric_gap(gap));
+        }
+
+        // Single logical class: use unique estimated errors.
+        let mut unique_solution_min_weight = HashMap::<Vec<Bit>, f64>::new();
+        for (decoding, &weight) in accepted_decodings.iter().zip(accepted_weights.iter()) {
+            let key = decoding.to_vec();
+            unique_solution_min_weight
+                .entry(key)
+                .and_modify(|w| {
+                    if weight < *w {
+                        *w = weight;
+                    }
+                })
+                .or_insert(weight);
+        }
+
+        if unique_solution_min_weight.len() <= 1 {
+            return Some("inf".to_string());
+        }
+
+        let mut mins = unique_solution_min_weight
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        mins.sort_by(|a, b| a.total_cmp(b));
+        let gap = mins[1] - mins[0];
+        Some(format!("s{}", Self::format_numeric_gap(gap)))
+    }
+
+    fn format_numeric_gap(gap: f64) -> String {
+        if !gap.is_finite() {
+            return "inf".to_string();
+        }
+        let rounded = (gap * 1_000_000.0).round() / 1_000_000.0;
+        if (rounded - rounded.round()).abs() < 1e-12 {
+            format!("{}", rounded.round() as i64)
+        } else {
+            format!("{:.6}", rounded).trim_end_matches('0').trim_end_matches('.').to_string()
+        }
+    }
 }
 
 impl DecoderRunner for ObservableDecoderRunner<'_> {}
@@ -418,6 +533,8 @@ pub struct ObservableDecodeResult {
     pub observables: Array1<Bit>,
     pub converged: bool,
     pub iterations: usize,
+    pub force_logical_error: bool,
+    pub confidence_score_token: Option<String>,
     pub true_decoding: Option<TrueDecodingResults>,
     pub physical_decode_result: Option<DecodeResult>,
 }

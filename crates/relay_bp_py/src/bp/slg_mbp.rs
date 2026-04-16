@@ -7,10 +7,12 @@ use pyo3::prelude::*;
 use crate::decoder::{get_sprs_bit_matrix_from_python, DecodeResult, DynDecoder};
 use relay_bp::bp::min_sum::MinSumDecoderConfig;
 use relay_bp::bp::slg_mbp::config::{
-    AdaptiveMemoryMode, AdaptivePerturbationPriorBaseMode, AdaptivePerturbationSignMode,
-    AdaptivePerturbationTarget, AdaptivePerturbationThresholdMode,
-    AdaptivePerturbationVariableBaseMode, GammaMode, InitPerturbationMode, InitStrategy,
-    PerturbationMethod, SLGMBPDecoderConfig,
+    AdaptiveMemoryMode, AdaptivePerturbationBiasMode, AdaptivePerturbationFactorMode,
+    AdaptivePerturbationPriorBaseMode, AdaptivePerturbationSignMode, AdaptivePerturbationTarget,
+    AdaptivePerturbationThresholdMode,
+    AdaptivePerturbationVariableBaseMode, FinalSolutionSelection, GammaMode,
+    InitPerturbationMode, InitStrategy, PerturbationMethod, SLGMBPDecoderConfig,
+    SolutionCollectionMode,
     SelectionMode, WeightedSelectionMode,
 };
 use relay_bp::bp::slg_mbp::SLGMBPDecoder;
@@ -51,6 +53,7 @@ impl SLGMBPDecoderF64 {
         weighted_selection_mode="softmax".to_string(),
         init_strategy="min-sum".to_string(),
         init_gamma=0.125,
+        initial_prior_bias=0.0,
         adaptive_perturbation=false,
         adaptive_perturbation_llr_threshold_mode="constant".to_string(),
         adaptive_perturbation_llr_threshold=0.0,
@@ -58,6 +61,9 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_llr_threshold_max=0.0,
         adaptive_perturbation_llr_threshold_factor=0.0,
         adaptive_perturbation_factor=1.0,
+        adaptive_perturbation_factor_mode="fixed".to_string(),
+        adaptive_perturbation_factor_interval=(1.0, 1.0),
+        adaptive_perturbation_bias_mode="additive".to_string(),
         adaptive_perturbation_sign_mode="random".to_string(),
         adaptive_perturbation_positive_sign_prob=0.5,
         adaptive_perturbation_target="prior".to_string(),
@@ -71,18 +77,24 @@ impl SLGMBPDecoderF64 {
         marginal_carry_llr_abs_threshold=-1.0,
         drop_p=0.0,
         drop_llr_threshold=0.0,
+        solution_collection_mode="first".to_string(),
+        n_solutions=1,
+        final_solution_selection="fastest".to_string(),
         gamma_mode="fixed".to_string(),
         gamma_fixed=0.125,
         gamma_interval=(0.0, 0.25),
+        gamma_random_sign_flip_prob=0.0,
         adaptive_memory=false,
         adaptive_memory_zeta=1.0,
         adaptive_memory_adjacent_gamma_interval=(0.0, 0.25),
         adaptive_memory_mode="probabilistic_flip".to_string(),
         biased_relay_mode=false,
+        switch_relay_leg=None,
         biased_relay_r_relay=10,
         biased_relay_maximum_round=10,
         biased_relay_t_0=80,
         biased_relay_r_relay_iter=60,
+        relay_gamma_interval=(0.0, 0.25),
         seed=0
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -115,6 +127,7 @@ impl SLGMBPDecoderF64 {
         weighted_selection_mode: String,
         init_strategy: String,
         init_gamma: f64,
+        initial_prior_bias: f64,
         adaptive_perturbation: bool,
         adaptive_perturbation_llr_threshold_mode: String,
         adaptive_perturbation_llr_threshold: f64,
@@ -122,6 +135,9 @@ impl SLGMBPDecoderF64 {
         adaptive_perturbation_llr_threshold_max: f64,
         adaptive_perturbation_llr_threshold_factor: f64,
         adaptive_perturbation_factor: f64,
+        adaptive_perturbation_factor_mode: String,
+        adaptive_perturbation_factor_interval: (f64, f64),
+        adaptive_perturbation_bias_mode: String,
         adaptive_perturbation_sign_mode: String,
         adaptive_perturbation_positive_sign_prob: f64,
         adaptive_perturbation_target: String,
@@ -135,18 +151,24 @@ impl SLGMBPDecoderF64 {
         marginal_carry_llr_abs_threshold: f64,
         drop_p: f64,
         drop_llr_threshold: f64,
+        solution_collection_mode: String,
+        n_solutions: usize,
+        final_solution_selection: String,
         gamma_mode: String,
         gamma_fixed: f64,
         gamma_interval: (f64, f64),
+        gamma_random_sign_flip_prob: f64,
         adaptive_memory: bool,
         adaptive_memory_zeta: f64,
         adaptive_memory_adjacent_gamma_interval: (f64, f64),
         adaptive_memory_mode: String,
         biased_relay_mode: bool,
+        switch_relay_leg: Option<usize>,
         biased_relay_r_relay: usize,
         biased_relay_maximum_round: usize,
         biased_relay_t_0: usize,
         biased_relay_r_relay_iter: usize,
+        relay_gamma_interval: (f64, f64),
         seed: u64,
     ) -> PyResult<(Self, DynDecoder)> {
         let decoder = Self {};
@@ -225,7 +247,27 @@ impl SLGMBPDecoderF64 {
                     AdaptivePerturbationTarget::Posterior
                 }
                 "both" => AdaptivePerturbationTarget::Both,
+                "memory_strength" | "memory-strength" | "gamma" => {
+                    AdaptivePerturbationTarget::MemoryStrength
+                }
                 _ => AdaptivePerturbationTarget::Prior,
+            };
+
+        let adaptive_perturbation_factor_mode =
+            match adaptive_perturbation_factor_mode
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "uniform_per_variable" | "uniform" | "interval_uniform" => {
+                    AdaptivePerturbationFactorMode::UniformPerVariable
+                }
+                _ => AdaptivePerturbationFactorMode::Fixed,
+            };
+
+        let adaptive_perturbation_bias_mode =
+            match adaptive_perturbation_bias_mode.to_ascii_lowercase().as_str() {
+                "scale" | "scaling" | "multiply" => AdaptivePerturbationBiasMode::Scale,
+                _ => AdaptivePerturbationBiasMode::Additive,
             };
 
         let adaptive_perturbation_prior_base_mode =
@@ -264,9 +306,59 @@ impl SLGMBPDecoderF64 {
                 _ => AdaptivePerturbationThresholdMode::Constant,
             };
 
+        let solution_collection_mode = match solution_collection_mode.to_ascii_lowercase().as_str()
+        {
+            "post_selection" | "post-selection" | "postselection" => {
+                SolutionCollectionMode::PostSelection
+            }
+            _ => SolutionCollectionMode::First,
+        };
+
+        let final_solution_selection =
+            match final_solution_selection.to_ascii_lowercase().as_str() {
+                "min_weight" | "minimum_weight" | "minweight" => {
+                    FinalSolutionSelection::MinWeight
+                }
+                _ => FinalSolutionSelection::Fastest,
+            };
+
+        if n_solutions == 0 {
+            return Err(PyValueError::new_err(
+                "n_solutions must be >= 1",
+            ));
+        }
+
+        if let Some(v) = switch_relay_leg {
+            if v == 0 {
+                return Err(PyValueError::new_err(
+                    "switch_relay_leg must be >= 1 when provided",
+                ));
+            }
+        }
+
         if !(0.0..=1.0).contains(&adaptive_perturbation_positive_sign_prob) {
             return Err(PyValueError::new_err(
                 "adaptive_perturbation_positive_sign_prob must be between 0.0 and 1.0",
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&gamma_random_sign_flip_prob) {
+            return Err(PyValueError::new_err(
+                "gamma_random_sign_flip_prob must be between 0.0 and 1.0",
+            ));
+        }
+
+        if adaptive_perturbation_factor <= 0.0 {
+            return Err(PyValueError::new_err(
+                "adaptive_perturbation_factor must be > 0.0",
+            ));
+        }
+
+        if adaptive_perturbation_factor_interval.0 <= 0.0
+            || adaptive_perturbation_factor_interval.1 <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "adaptive_perturbation_factor_interval values must be > 0.0",
             ));
         }
 
@@ -306,6 +398,7 @@ impl SLGMBPDecoderF64 {
             init_perturbation_mode: init_mode,
             init_strategy,
             init_gamma,
+            initial_prior_bias,
             adaptive_perturbation,
             adaptive_perturbation_llr_threshold_mode,
             adaptive_perturbation_llr_threshold,
@@ -313,6 +406,9 @@ impl SLGMBPDecoderF64 {
             adaptive_perturbation_llr_threshold_max,
             adaptive_perturbation_llr_threshold_factor,
             adaptive_perturbation_factor,
+            adaptive_perturbation_factor_mode,
+            adaptive_perturbation_factor_interval,
+            adaptive_perturbation_bias_mode,
             adaptive_perturbation_sign_mode,
             adaptive_perturbation_positive_sign_prob,
             adaptive_perturbation_target,
@@ -326,18 +422,24 @@ impl SLGMBPDecoderF64 {
             marginal_carry_llr_abs_threshold,
             drop_p,
             drop_llr_threshold,
+            solution_collection_mode,
+            n_solutions,
+            final_solution_selection,
             gamma_mode,
             gamma_fixed,
             gamma_interval,
+            gamma_random_sign_flip_prob,
             adaptive_memory,
             adaptive_memory_zeta,
             adaptive_memory_adjacent_gamma_interval,
             adaptive_memory_mode,
             biased_relay_mode,
+            switch_relay_leg,
             biased_relay_r_relay,
             biased_relay_maximum_round,
             biased_relay_t_0,
             biased_relay_r_relay_iter,
+            relay_gamma_interval,
             seed,
         };
 

@@ -95,6 +95,7 @@ pub struct MinSumBPDecoder<N: PartialEq + Default + Clone + Copy> {
     variable_to_check_nnz_map: Vec<usize>,
     posterior_ratios: Array1<N>,
     memory_strengths: Array1<N>,
+    variable_alphas: Option<Array1<N>>,
     decoding: Array1<Bit>,
     max_data_value: Option<N>,
     data_scale_value: Option<N>,
@@ -188,6 +189,7 @@ where
             variable_to_check_nnz_map,
             posterior_ratios,
             memory_strengths,
+            variable_alphas: None,
             decoding,
             max_data_value,
             data_scale_value,
@@ -228,6 +230,100 @@ where
         };
     }
 
+    /// Predict posterior marginals from the current check-to-variable messages,
+    /// using externally supplied previous marginals and memory strengths.
+    pub fn predict_posterior_from_previous_and_memory_f64(
+        &self,
+        previous_posterior: &Array1<f64>,
+        memory_strengths: &Array1<f64>,
+        previous_check_message_sum: Option<&Array1<f64>>,
+        previous_check_message_beta: f64,
+    ) -> Array1<f64> {
+        let variable_count = self.check_to_variable.outer_dims();
+        let prior_llr = self.config.log_prior_ratios();
+        let mut predicted = Array1::<f64>::zeros(variable_count);
+
+        for var_idx in 0..variable_count {
+            let gamma = memory_strengths[var_idx];
+            let variable_prior =
+                (1.0 - gamma) * prior_llr[var_idx] + gamma * previous_posterior[var_idx];
+
+            let check_sum = self
+                .check_to_variable
+                .outer_view(var_idx)
+                .map(|col_vec| {
+                    col_vec
+                        .iter()
+                        .map(|(_, val)| {
+                            let msg = N::to_f64(val).unwrap_or(0.0);
+                            match self.config.data_scale_value {
+                                Some(scale_val) => msg / scale_val,
+                                None => msg,
+                            }
+                        })
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+
+            let previous_check_sum = previous_check_message_sum
+                .map(|sums| sums[var_idx])
+                .unwrap_or(0.0);
+
+            predicted[var_idx] =
+                variable_prior + check_sum + previous_check_message_beta * previous_check_sum;
+        }
+
+        predicted
+    }
+
+    /// Return per-variable sums of current check-to-variable messages in f64 scale.
+    pub fn sum_check_to_variable_by_variable_f64(&self) -> Array1<f64> {
+        let variable_count = self.check_to_variable.outer_dims();
+        let mut sums = Array1::<f64>::zeros(variable_count);
+
+        for var_idx in 0..variable_count {
+            sums[var_idx] = self
+                .check_to_variable
+                .outer_view(var_idx)
+                .map(|col_vec| {
+                    col_vec
+                        .iter()
+                        .map(|(_, val)| {
+                            let msg = N::to_f64(val).unwrap_or(0.0);
+                            match self.config.data_scale_value {
+                                Some(scale_val) => msg / scale_val,
+                                None => msg,
+                            }
+                        })
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+        }
+
+        sums
+    }
+
+    /// Apply externally selected posterior marginals and rebuild a single
+    /// variable-to-check message state from them.
+    pub fn set_posterior_and_rebuild_variable_to_check_f64(&mut self, posterior: Array1<f64>) {
+        self.set_posterior_ratios_f64(posterior);
+
+        for var_idx in 0..self.check_to_variable.outer_dims() {
+            let data_range = self.check_to_variable.indptr().outer_inds(var_idx);
+            for (ind, check_to_var_msg) in izip!(
+                data_range.clone(),
+                &self.check_to_variable.data()[data_range.clone()]
+            ) {
+                let map_ind = self.check_to_variable_nnz_map[ind];
+                self.variable_to_check.data_mut()[map_ind] =
+                    self.posterior_ratios[var_idx] + check_to_var_msg.neg();
+            }
+        }
+
+        self.bound_magnitudes();
+        self.compute_hard_decision();
+    }
+
     /// Set external memory strengths from f64. Applies scaling if needed.
     pub fn set_memory_strengths_f64(&mut self, memory_strengths: Array1<f64>) {
         self.memory_strengths = match self.config.data_scale_value {
@@ -247,6 +343,19 @@ where
             }
             None => memory_strengths,
         };
+    }
+
+    /// Set optional per-variable alpha values used in check-to-variable updates.
+    /// When None, the scalar alpha schedule from config is used.
+    pub fn set_variable_alphas_f64(&mut self, variable_alphas: Option<Array1<f64>>) {
+        self.variable_alphas = variable_alphas.map(|alphas| match self.config.data_scale_value {
+            Some(scale_val) => alphas.mapv_into_any(|v| N::from_f64(scale_val * v).unwrap()),
+            None => alphas.mapv_into_any(|v| N::from_f64(v).unwrap()),
+        });
+    }
+
+    pub fn clear_variable_alphas(&mut self) {
+        self.variable_alphas = None;
     }
 
     // Construct a new check message graph
@@ -361,6 +470,7 @@ where
         detectors: ArrayView1<Bit>,
     ) -> &mut SparseBipartiteGraph<N> {
         let alpha = self.alpha();
+        let variable_alphas = self.variable_alphas.as_ref();
 
         for (var_check_row_ind, var_check_row_vec) in
             self.variable_to_check.outer_iterator().enumerate()
@@ -409,8 +519,12 @@ where
                 } else {
                     second_min_message
                 };
+                let alpha_for_variable = match variable_alphas {
+                    Some(alphas) => alphas[*var_check_col_ind],
+                    None => alpha,
+                };
                 // Copy the sign to the variable. check_to_variable_min is guranteed to be positive.
-                let mut check_to_variable = alpha * check_to_variable_min;
+                let mut check_to_variable = alpha_for_variable * check_to_variable_min;
                 if check_to_variable_sign {
                     check_to_variable = check_to_variable.neg();
                 }
@@ -654,6 +768,7 @@ where
         };
 
         let alpha = self.alpha();
+        let variable_alphas = self.variable_alphas.as_ref();
         let row_sign = if detectors[check_idx] == 1 {
             N::one().neg()
         } else {
@@ -685,7 +800,12 @@ where
                 second_min_message
             };
 
-            let mut check_to_variable = alpha * check_to_variable_min;
+            let alpha_for_variable = match variable_alphas {
+                Some(alphas) => alphas[var_idx],
+                None => alpha,
+            };
+
+            let mut check_to_variable = alpha_for_variable * check_to_variable_min;
             if check_to_variable_sign {
                 check_to_variable = check_to_variable.neg();
             }

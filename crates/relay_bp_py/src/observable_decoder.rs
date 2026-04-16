@@ -62,6 +62,16 @@ impl ObservableDecodeResult {
     }
 
     #[getter]
+    pub fn force_logical_error(&self) -> bool {
+        self.inner.force_logical_error
+    }
+
+    #[getter]
+    pub fn confidence_score_token(&self) -> Option<String> {
+        self.inner.confidence_score_token.clone()
+    }
+
+    #[getter]
     pub fn unconverged_no_error(&self) -> Option<bool> {
         let true_decoding = self.inner.true_decoding.as_ref()?;
         Some(true_decoding.unconverged_no_error)

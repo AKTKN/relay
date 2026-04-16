@@ -15,6 +15,9 @@ except ImportError:
 
 from .sinter import (
     CheckMatrices,
+    SinterDecoder_AdaptiveRelay,
+    SinterDecoder_DualRelay,
+    SinterDecoder_LBF,
     SinterDecoder_LRBP,
     SinterDecoder_MemBP,
     SinterDecoder_MSLBP,

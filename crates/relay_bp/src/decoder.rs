@@ -222,6 +222,20 @@ pub struct DecodeResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum BPExtraResult {
     None,
+    LBFTrace {
+        converged: bool,
+    },
+    DisorderedBPTrace {
+        leg_success: Vec<bool>,
+        leg_iterations: Vec<usize>,
+        leg_negative_llr_counts: Vec<usize>,
+        leg_decodings: Vec<Array1<Bit>>,
+        leg_posteriors: Vec<Array1<f64>>,
+        leg_alpha_means: Vec<f64>,
+        leg_gamma_means: Vec<f64>,
+        leg_bias_means: Vec<f64>,
+        leg_bias_applied_counts: Vec<usize>,
+    },
     RelayTrace {
         leg_success: Vec<bool>,
         leg_iterations: Vec<usize>,
@@ -231,6 +245,16 @@ pub enum BPExtraResult {
         relay_parallel_avg_iter_seconds: Option<f64>,
         dyn_phase_avg_iter_seconds: Option<f64>,
     },
+    AdaptiveRelayTrace {
+        executed_members: usize,
+        winner_member_index: Option<usize>,
+        member_success: Vec<bool>,
+        member_discovery_iterations: Vec<Option<usize>>,
+        member_total_iterations: Vec<usize>,
+        leg_iterations: Vec<usize>,
+        gamma_history: Vec<f64>,
+        clamp_applied_count: usize,
+    },
     SLGMBPTrace {
         phase1_converged: bool,
         phase1_iterations: usize,
@@ -238,9 +262,25 @@ pub enum BPExtraResult {
         generation_count: usize,
         generation_best_fitness: Vec<f64>,
         selected_solution_posterior: Option<Array1<f64>>,
+        accepted_solution_decodings: Vec<Array1<Bit>>,
+        accepted_solution_weights: Vec<f64>,
+        accepted_solution_discovery_iterations: Vec<usize>,
         residual_weight_history: Vec<usize>,
         gamma_history: Vec<f64>,
         detailed_dynamics: Option<SLGMBPDetailedDynamicsTrace>,
         score_spike_trace: Option<SLGMBPScoreSpikeTrace>,
+    },
+    DualRelayTrace {
+        leg_success: Vec<bool>,
+        leg_iterations: Vec<usize>,
+        leg_negative_llr_counts: Vec<usize>,
+        leg_decodings: Vec<Array1<Bit>>,
+        leg_posteriors: Vec<Array1<f64>>,
+        slow_success_count: usize,
+        fast_success_count: usize,
+        joint_success_count: usize,
+        naive_average_applied_count: usize,
+        weighted_fast_disagreement_applied_count: usize,
+        unique_solution_count: usize,
     },
 }

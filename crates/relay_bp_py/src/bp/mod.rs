@@ -12,7 +12,11 @@ pub mod min_sum;
 pub mod min_sum_fixed;
 pub mod lrbp;
 pub mod relay;
+pub mod adaptive_relay;
 pub mod slg_mbp;
+pub mod disordered_bp;
+pub mod dual_relay;
+pub mod lbf;
 
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult};
@@ -31,11 +35,15 @@ pub fn _bp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<relay::RelayDecoderF64>()?;
     m.add_class::<relay::RelayDecoderI32>()?;
     m.add_class::<relay::RelayDecoderI64>()?;
+    m.add_class::<adaptive_relay::AdaptiveRelayDecoderF64>()?;
+    m.add_class::<disordered_bp::DisorderedBPDecoderF64>()?;
+    m.add_class::<dual_relay::DualRelayDecoderF64>()?;
     m.add_class::<lrbp::LRBPDecoderF32>()?;
     m.add_class::<lrbp::LRBPDecoderF64>()?;
     m.add_class::<lrbp::LRBPDecoderI32>()?;
     m.add_class::<lrbp::LRBPDecoderI64>()?;
     m.add_class::<slg_mbp::SLGMBPDecoderF64>()?;
+    m.add_class::<lbf::LBFDecoder>()?;
     Ok(())
 }
 
