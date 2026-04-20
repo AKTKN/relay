@@ -1030,6 +1030,7 @@ where
         &mut self,
         detectors: ArrayView1<Bit>,
         k_default: usize,
+        t_warmup: usize,
         theta_r_default: f64,
         n_min_default: usize,
         low_threshold_0: f64,
@@ -1045,6 +1046,7 @@ where
         let scale = self.config.data_scale_value.unwrap_or(1.0);
         let k_default = k_default.max(1);
         let endpoint_k = endpoint_k.max(1);
+        let detection_start_t = t_warmup.saturating_add(k_default);
         let theta_r_default = theta_r_default.clamp(0.0, 1.0);
         let low_threshold_0 = low_threshold_0.abs();
         let low_threshold_1 = low_threshold_1.abs();
@@ -1069,6 +1071,7 @@ where
         // Flip-rate window state for r_j(t; K_default).
         let mut flip_ring: Vec<u8> = vec![0; k_default * n_vars];
         let mut flip_sum: Vec<u16> = vec![0; n_vars];
+        let mut post_warmup_flip_count: usize = 0;
 
         let mut w_sigma: Vec<u32> = Vec::with_capacity(self.config.max_iter);
         let mut delta_hd: Vec<u32> = Vec::with_capacity(self.config.max_iter);
@@ -1129,8 +1132,13 @@ where
             } else {
                 0
             };
-            let flip_store_pos = (t - 1) % k_default;
-            let flip_store_offset = flip_store_pos * n_vars;
+            let use_in_window = t > t_warmup;
+            let window_ready = use_in_window && (post_warmup_flip_count + 1 >= k_default);
+            let flip_store_offset = if use_in_window {
+                (post_warmup_flip_count % k_default) * n_vars
+            } else {
+                0
+            };
 
             let mut delta_hd_count: u32 = 0;
             let mut delta_m_sum_sq: f64 = 0.0;
@@ -1159,13 +1167,19 @@ where
 
                 // flip_s = sgn(M(t)) XOR sgn(M(t-1))
                 let flip = sign ^ prev_sign[j];
-                let old_flip = flip_ring[flip_store_offset + j];
-                flip_ring[flip_store_offset + j] = flip;
-                let updated_sum = (flip_sum[j] as i32) + (flip as i32) - (old_flip as i32);
-                flip_sum[j] = updated_sum.max(0) as u16;
+                let old_flip = if use_in_window && window_ready {
+                    flip_ring[flip_store_offset + j]
+                } else {
+                    0
+                };
+                if use_in_window {
+                    flip_ring[flip_store_offset + j] = flip;
+                    let updated_sum = (flip_sum[j] as i32) + (flip as i32) - (old_flip as i32);
+                    flip_sum[j] = updated_sum.max(0) as u16;
+                }
                 prev_sign[j] = sign;
 
-                if t >= k_default {
+                if window_ready {
                     if (flip_sum[j] as f64) > theta_r_default * (k_default as f64) {
                         v_osc_count += 1;
                     }
@@ -1194,6 +1208,10 @@ where
                     let bit_in_byte = 7 - (j % 8);
                     packed_row[byte_index] |= 1u8 << bit_in_byte;
                 }
+            }
+
+            if use_in_window {
+                post_warmup_flip_count += 1;
             }
 
             if collect_sign_trajectory {
@@ -1226,7 +1244,7 @@ where
             v_osc.push(v_osc_count);
 
             if t_stag.is_none()
-                && t >= k_default
+                && t >= detection_start_t
                 && w > 0
                 && (v_osc_count as usize) >= n_min_default
             {
@@ -1460,6 +1478,7 @@ mod tests {
         let (actual, metrics) = decoder.decode_detailed_step1_metrics(
             detectors.view(),
             20,
+            0,
             0.4,
             3,
             0.1,
@@ -1487,6 +1506,66 @@ mod tests {
         assert!(metrics.sign_trajectory_packed.is_none());
         assert!(metrics.abs_m_snapshots.is_none());
         assert!(metrics.snapshot_times.is_empty());
+    }
+
+    #[test]
+    fn decode_detailed_step1_metrics_respects_warmup_window_start() {
+        init();
+
+        let check_matrix = array![[1, 1, 0], [0, 1, 1],];
+        let check_matrix: SparseBipartiteGraph<_> = SparseBipartiteGraph::from_dense(check_matrix);
+        let arc_check_matrix = Arc::new(check_matrix);
+
+        let iterations = 25;
+        let bp_config = MinSumDecoderConfig {
+            error_priors: array![0.003, 0.003, 0.003],
+            max_iter: iterations,
+            ..Default::default()
+        };
+        let arc_bp_config = Arc::new(bp_config);
+
+        let mut decoder: MinSumBPDecoder<f64> = MinSumBPDecoder::new(arc_check_matrix, arc_bp_config);
+        let detectors: Array1<Bit> = array![1, 0];
+
+        let k_default = 3usize;
+        let t_warmup = 4usize;
+        let first_possible_t = t_warmup + k_default;
+
+        let (_actual, metrics) = decoder.decode_detailed_step1_metrics(
+            detectors.view(),
+            k_default,
+            t_warmup,
+            0.0,
+            0,
+            0.1,
+            0.5,
+            20,
+            false,
+            None,
+        );
+
+        let prefix_len = metrics
+            .v_osc
+            .len()
+            .min(first_possible_t.saturating_sub(1));
+        for idx in 0..prefix_len {
+            assert_eq!(
+                metrics.v_osc[idx],
+                0,
+                "v_osc must be zero before warmup+window; t={} threshold={}",
+                idx + 1,
+                first_possible_t,
+            );
+        }
+
+        if let Some(t_stag) = metrics.t_stag {
+            assert!(
+                t_stag >= first_possible_t,
+                "t_stag={} should be >= warmup+window={}",
+                t_stag,
+                first_possible_t,
+            );
+        }
     }
 
     #[test]

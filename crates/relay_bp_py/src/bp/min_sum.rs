@@ -98,6 +98,7 @@ macro_rules! create_bp_interface {
                 signature = (
                     detectors,
                     k_default=20,
+                    t_warmup=0,
                     theta_r_default=0.4,
                     n_min_default=3,
                     low_threshold_0=0.1,
@@ -113,6 +114,7 @@ macro_rules! create_bp_interface {
                 py: Python<'py>,
                 detectors: PyReadonlyArray1<'_, Bit>,
                 k_default: usize,
+                t_warmup: usize,
                 theta_r_default: f64,
                 n_min_default: usize,
                 low_threshold_0: f64,
@@ -134,6 +136,7 @@ macro_rules! create_bp_interface {
                 let (result, metrics) = min_sum.decode_detailed_step1_metrics(
                     detectors.as_array(),
                     k_default,
+                    t_warmup,
                     theta_r_default,
                     n_min_default,
                     low_threshold_0,
