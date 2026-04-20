@@ -424,6 +424,14 @@ where
         + std::fmt::Display
         + 'static,
 {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn check_matrix(&self) -> Arc<SparseBitMatrix> {
         self.bp_decoder.check_matrix()
     }

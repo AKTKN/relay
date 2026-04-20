@@ -508,6 +508,14 @@ impl<'a> ObservableDecoderRunner<'a> {
 impl DecoderRunner for ObservableDecoderRunner<'_> {}
 
 impl Decoder for ObservableDecoderRunner<'_> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self.get_decoder().as_any()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self.get_decoder_mut().as_any_mut()
+    }
+
     fn check_matrix(&self) -> Arc<SparseBitMatrix> {
         self.get_decoder().check_matrix()
     }

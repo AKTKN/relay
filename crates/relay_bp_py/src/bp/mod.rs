@@ -17,6 +17,7 @@ pub mod slg_mbp;
 pub mod disordered_bp;
 pub mod dual_relay;
 pub mod lbf;
+pub mod clip_bp;
 
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult};
@@ -44,6 +45,7 @@ pub fn _bp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<lrbp::LRBPDecoderI64>()?;
     m.add_class::<slg_mbp::SLGMBPDecoderF64>()?;
     m.add_class::<lbf::LBFDecoder>()?;
+    m.add_class::<clip_bp::ClipBPDecoderF64>()?;
     Ok(())
 }
 

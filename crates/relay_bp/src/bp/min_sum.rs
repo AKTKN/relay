@@ -23,6 +23,28 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
+pub struct Step1Metrics {
+    pub variable_count: usize,
+    pub w_sigma: Vec<u32>,
+    pub delta_hd: Vec<u32>,
+    pub delta_m_l2: Vec<f64>,
+    pub m_norm_l2: Vec<f64>,
+    pub m_bar: Vec<f64>,
+    pub f_low_0: Vec<f64>,
+    pub f_low_1: Vec<f64>,
+    pub f_endpoint: Vec<u32>,
+    pub v_osc: Vec<u32>,
+    pub t_stag: Option<usize>,
+    /// Packed sign bits (1 when M<0, else 0), shape (iterations, ceil(n_vars/8)).
+    /// Bit-order within each byte is big-endian (same as numpy.packbits default).
+    pub sign_trajectory_packed: Option<Vec<u8>>,
+    pub sign_bytes_per_iter: usize,
+    /// Absolute-marginal snapshots, flattened shape (n_snap, n_vars), row-major.
+    pub abs_m_snapshots: Option<Vec<f32>>,
+    pub snapshot_times: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
 pub struct MinSumDecoderConfig {
     pub error_priors: Array1<f64>,
     pub max_iter: usize,
@@ -998,6 +1020,257 @@ where
     ) -> bool {
         detectors == decoded_detectors
     }
+
+    /// Decode while collecting per-iteration metrics used by the Step1 stagnation detector.
+    ///
+    /// This method does not change the underlying BP update logic; it only observes
+    /// decoder state after each iteration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_detailed_step1_metrics(
+        &mut self,
+        detectors: ArrayView1<Bit>,
+        k_default: usize,
+        theta_r_default: f64,
+        n_min_default: usize,
+        low_threshold_0: f64,
+        low_threshold_1: f64,
+        endpoint_k: usize,
+        collect_sign_trajectory: bool,
+        snapshot_times: Option<&[usize]>,
+    ) -> (DecodeResult, Step1Metrics) {
+        // Initialize probability ratios.
+        self.initialize_decoder();
+
+        let n_vars = self.check_matrix.cols();
+        let scale = self.config.data_scale_value.unwrap_or(1.0);
+        let k_default = k_default.max(1);
+        let endpoint_k = endpoint_k.max(1);
+        let theta_r_default = theta_r_default.clamp(0.0, 1.0);
+        let low_threshold_0 = low_threshold_0.abs();
+        let low_threshold_1 = low_threshold_1.abs();
+
+        // Define t=0 using the variable prior only (no incoming check messages).
+        let mut prev_hat_e: Vec<u8> = vec![0; n_vars];
+        let mut prev_m: Vec<f64> = vec![0.0; n_vars];
+        let mut prev_sign: Vec<u8> = vec![0; n_vars];
+        for j in 0..n_vars {
+            let m0 = N::to_f64(&self.log_prior_ratios[j]).unwrap_or(0.0) / scale;
+            prev_m[j] = m0;
+            prev_hat_e[j] = Bit::from(m0 <= 0.0);
+            // sgn(0) := +1, so treat m==0 as non-negative.
+            prev_sign[j] = u8::from(m0 < 0.0);
+        }
+
+        // Endpoint sign history for F_{endpoint_k}: store t=0 then roll.
+        let endpoint_ring_len = endpoint_k + 1;
+        let mut sign_endpoint_ring: Vec<u8> = vec![0; endpoint_ring_len * n_vars];
+        sign_endpoint_ring[0..n_vars].copy_from_slice(&prev_sign);
+
+        // Flip-rate window state for r_j(t; K_default).
+        let mut flip_ring: Vec<u8> = vec![0; k_default * n_vars];
+        let mut flip_sum: Vec<u16> = vec![0; n_vars];
+
+        let mut w_sigma: Vec<u32> = Vec::with_capacity(self.config.max_iter);
+        let mut delta_hd: Vec<u32> = Vec::with_capacity(self.config.max_iter);
+        let mut delta_m_l2: Vec<f64> = Vec::with_capacity(self.config.max_iter);
+        let mut m_norm_l2: Vec<f64> = Vec::with_capacity(self.config.max_iter);
+        let mut m_bar: Vec<f64> = Vec::with_capacity(self.config.max_iter);
+        let mut f_low_0: Vec<f64> = Vec::with_capacity(self.config.max_iter);
+        let mut f_low_1: Vec<f64> = Vec::with_capacity(self.config.max_iter);
+        let mut f_endpoint: Vec<u32> = Vec::with_capacity(self.config.max_iter);
+        let mut v_osc: Vec<u32> = Vec::with_capacity(self.config.max_iter);
+
+        let sign_bytes_per_iter = (n_vars + 7) / 8;
+        let mut sign_trajectory_packed: Option<Vec<u8>> = if collect_sign_trajectory {
+            Some(Vec::with_capacity(self.config.max_iter * sign_bytes_per_iter))
+        } else {
+            None
+        };
+
+        let mut snapshot_times_sorted: Vec<usize> = snapshot_times
+            .map(|times| {
+                let mut v = times.to_vec();
+                v.sort_unstable();
+                v.dedup();
+                v
+            })
+            .unwrap_or_default();
+        // Ignore t=0 snapshots for now (spec uses t>=1).
+        snapshot_times_sorted.retain(|t| *t > 0);
+        let mut abs_m_snapshots: Option<Vec<f32>> = if snapshot_times_sorted.is_empty() {
+            None
+        } else {
+            Some(vec![0.0; snapshot_times_sorted.len() * n_vars])
+        };
+        let mut next_snapshot_index: usize = 0;
+
+        let mut success: bool = false;
+        let mut decoded_detectors = Array1::default(detectors.dim());
+        let mut t_stag: Option<usize> = None;
+
+        for _ in 0..self.config.max_iter {
+            self.run_iteration(detectors);
+            self.current_iteration += 1;
+            let t = self.current_iteration;
+
+            decoded_detectors = self.compute_decoded_detectors();
+            let mut w: u32 = 0;
+            for i in 0..detectors.len() {
+                if detectors[i] != decoded_detectors[i] {
+                    w += 1;
+                }
+            }
+            success = w == 0;
+
+            // Compute per-variable metrics.
+            let endpoint_store_pos = t % endpoint_ring_len;
+            let endpoint_old_pos = if t >= endpoint_k {
+                (t - endpoint_k) % endpoint_ring_len
+            } else {
+                0
+            };
+            let flip_store_pos = (t - 1) % k_default;
+            let flip_store_offset = flip_store_pos * n_vars;
+
+            let mut delta_hd_count: u32 = 0;
+            let mut delta_m_sum_sq: f64 = 0.0;
+            let mut m_norm_sum_sq: f64 = 0.0;
+            let mut abs_sum: f64 = 0.0;
+            let mut low0_count: u32 = 0;
+            let mut low1_count: u32 = 0;
+            let mut f_endpoint_count: u32 = 0;
+            let mut v_osc_count: u32 = 0;
+
+            let mut packed_row: Vec<u8> = if collect_sign_trajectory {
+                vec![0u8; sign_bytes_per_iter]
+            } else {
+                Vec::new()
+            };
+
+            for j in 0..n_vars {
+                let m = N::to_f64(&self.posterior_ratios[j]).unwrap_or(0.0) / scale;
+                let sign = u8::from(m < 0.0);
+
+                if t >= endpoint_k {
+                    let old_sign = sign_endpoint_ring[endpoint_old_pos * n_vars + j];
+                    f_endpoint_count += u32::from((sign ^ old_sign) != 0);
+                }
+                sign_endpoint_ring[endpoint_store_pos * n_vars + j] = sign;
+
+                // flip_s = sgn(M(t)) XOR sgn(M(t-1))
+                let flip = sign ^ prev_sign[j];
+                let old_flip = flip_ring[flip_store_offset + j];
+                flip_ring[flip_store_offset + j] = flip;
+                let updated_sum = (flip_sum[j] as i32) + (flip as i32) - (old_flip as i32);
+                flip_sum[j] = updated_sum.max(0) as u16;
+                prev_sign[j] = sign;
+
+                if t >= k_default {
+                    if (flip_sum[j] as f64) > theta_r_default * (k_default as f64) {
+                        v_osc_count += 1;
+                    }
+                }
+
+                let hat = self.decoding[j];
+                delta_hd_count += u32::from((hat ^ prev_hat_e[j]) != 0);
+                prev_hat_e[j] = hat;
+
+                let dm = m - prev_m[j];
+                delta_m_sum_sq += dm * dm;
+                prev_m[j] = m;
+
+                m_norm_sum_sq += m * m;
+                let abs_m = m.abs();
+                abs_sum += abs_m;
+                if abs_m < low_threshold_0 {
+                    low0_count += 1;
+                }
+                if abs_m < low_threshold_1 {
+                    low1_count += 1;
+                }
+
+                if collect_sign_trajectory && sign != 0 {
+                    let byte_index = j / 8;
+                    let bit_in_byte = 7 - (j % 8);
+                    packed_row[byte_index] |= 1u8 << bit_in_byte;
+                }
+            }
+
+            if collect_sign_trajectory {
+                if let Some(buf) = sign_trajectory_packed.as_mut() {
+                    buf.extend_from_slice(&packed_row);
+                }
+            }
+
+            // Snapshots of |M| at selected times.
+            if let Some(snaps) = abs_m_snapshots.as_mut() {
+                while next_snapshot_index < snapshot_times_sorted.len()
+                    && snapshot_times_sorted[next_snapshot_index] == t
+                {
+                    let base = next_snapshot_index * n_vars;
+                    for j in 0..n_vars {
+                        snaps[base + j] = prev_m[j].abs() as f32;
+                    }
+                    next_snapshot_index += 1;
+                }
+            }
+
+            w_sigma.push(w);
+            delta_hd.push(delta_hd_count);
+            delta_m_l2.push(delta_m_sum_sq.sqrt());
+            m_norm_l2.push(m_norm_sum_sq.sqrt());
+            m_bar.push(abs_sum / (n_vars as f64));
+            f_low_0.push((low0_count as f64) / (n_vars as f64));
+            f_low_1.push((low1_count as f64) / (n_vars as f64));
+            f_endpoint.push(f_endpoint_count);
+            v_osc.push(v_osc_count);
+
+            if t_stag.is_none()
+                && t >= k_default
+                && w > 0
+                && (v_osc_count as usize) >= n_min_default
+            {
+                t_stag = Some(t);
+            }
+
+            if success {
+                debug!("Succeeded on iteration {:?}", self.current_iteration);
+                break;
+            }
+        }
+
+        // If we exited early, fill any remaining requested snapshots with the final |M|.
+        if let Some(snaps) = abs_m_snapshots.as_mut() {
+            while next_snapshot_index < snapshot_times_sorted.len() {
+                let base = next_snapshot_index * n_vars;
+                for j in 0..n_vars {
+                    snaps[base + j] = prev_m[j].abs() as f32;
+                }
+                next_snapshot_index += 1;
+            }
+        }
+
+        let decode_result = self.build_result(success, decoded_detectors, self.config.max_iter);
+        let metrics = Step1Metrics {
+            variable_count: n_vars,
+            w_sigma,
+            delta_hd,
+            delta_m_l2,
+            m_norm_l2,
+            m_bar,
+            f_low_0,
+            f_low_1,
+            f_endpoint,
+            v_osc,
+            t_stag,
+            sign_trajectory_packed,
+            sign_bytes_per_iter,
+            abs_m_snapshots,
+            snapshot_times: snapshot_times_sorted,
+        };
+
+        (decode_result, metrics)
+    }
 }
 
 impl<N> Decoder for MinSumBPDecoder<N>
@@ -1022,6 +1295,14 @@ where
         + std::fmt::Display
         + 'static,
 {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn check_matrix(&self) -> Arc<SparseBitMatrix> {
         self.check_matrix.clone()
     }
@@ -1153,6 +1434,59 @@ mod tests {
         assert_eq!(result.decoded_detectors, detectors);
         assert_eq!(result.max_iter, iterations);
         assert!(result.success);
+    }
+
+    #[test]
+    fn decode_detailed_step1_metrics_matches_decode_detailed() {
+        init();
+
+        // Build 3, 2 qubit repetition code with weight 2 checks
+        let check_matrix = array![[1, 1, 0], [0, 1, 1],];
+        let check_matrix: SparseBipartiteGraph<_> = SparseBipartiteGraph::from_dense(check_matrix);
+        let arc_check_matrix = Arc::new(check_matrix);
+
+        let iterations = 10;
+        let bp_config = MinSumDecoderConfig {
+            error_priors: array![0.003, 0.003, 0.003],
+            max_iter: iterations,
+            ..Default::default()
+        };
+        let arc_bp_config = Arc::new(bp_config);
+
+        let mut decoder: MinSumBPDecoder<f64> = MinSumBPDecoder::new(arc_check_matrix, arc_bp_config);
+        let detectors: Array1<Bit> = array![0, 0];
+
+        let expected = decoder.clone().decode_detailed(detectors.view());
+        let (actual, metrics) = decoder.decode_detailed_step1_metrics(
+            detectors.view(),
+            20,
+            0.4,
+            3,
+            0.1,
+            0.5,
+            20,
+            false,
+            None,
+        );
+
+        assert_eq!(expected.success, actual.success);
+        assert_eq!(expected.iterations, actual.iterations);
+        assert_eq!(expected.decoding, actual.decoding);
+        assert_eq!(expected.decoded_detectors, actual.decoded_detectors);
+
+        let iters = actual.iterations;
+        assert_eq!(metrics.w_sigma.len(), iters);
+        assert_eq!(metrics.delta_hd.len(), iters);
+        assert_eq!(metrics.delta_m_l2.len(), iters);
+        assert_eq!(metrics.m_norm_l2.len(), iters);
+        assert_eq!(metrics.m_bar.len(), iters);
+        assert_eq!(metrics.f_low_0.len(), iters);
+        assert_eq!(metrics.f_low_1.len(), iters);
+        assert_eq!(metrics.f_endpoint.len(), iters);
+        assert_eq!(metrics.v_osc.len(), iters);
+        assert!(metrics.sign_trajectory_packed.is_none());
+        assert!(metrics.abs_m_snapshots.is_none());
+        assert!(metrics.snapshot_times.is_empty());
     }
 
     #[test]

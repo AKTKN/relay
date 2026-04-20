@@ -655,6 +655,73 @@ class SinterDecoder_LBF(SinterDecoder_BaseBP):
         return observable_decoder
 
 
+class SinterDecoder_ClipBP(SinterDecoder_BaseBP):
+    def __init__(
+        self,
+        min_llr: float = 0.3,
+        sign_mode: str = "hysteresis",
+        gamma_first: float = 0.125,
+        gamma_center: float = 0.21,
+        gamma_width: float = 0.9,
+        max_legs: int = 100,
+        max_iter_first: int = 80,
+        max_iter: int = 60,
+        max_solutions: int = 1,
+        alpha: float | None = None,
+        seed: int = 0,
+        parallel: bool = False,
+        decomposed_hyperedges: bool | None = None,
+        prune_decided_errors: bool = True,
+        threshold: float = 0.0,
+        collect_iteration_metric: bool = False,
+    ):
+        self.min_llr = min_llr
+        self.sign_mode = sign_mode
+        self.gamma_first = gamma_first
+        self.gamma_center = gamma_center
+        self.gamma_width = gamma_width
+        self.max_legs = max_legs
+        self.max_iter_first = max_iter_first
+        self.max_iter = max_iter
+        self.max_solutions = max_solutions
+        self.alpha = alpha
+        self.seed = seed
+        super().__init__(
+            parallel=parallel,
+            decomposed_hyperedges=decomposed_hyperedges,
+            prune_decided_errors=prune_decided_errors,
+            threshold=threshold,
+            collect_iteration_metric=collect_iteration_metric,
+        )
+
+    def build_observable_decoder(
+        self,
+        check_matrices: CheckMatrices,
+    ) -> relay_bp.ObservableDecoderRunner:
+        decoder = relay_bp.ClipBPDecoderF64(
+            check_matrices.check_matrix,
+            error_priors=check_matrices.error_priors,
+            min_llr=self.min_llr,
+            sign_mode=self.sign_mode,
+            gamma_first=self.gamma_first,
+            gamma_center=self.gamma_center,
+            gamma_width=self.gamma_width,
+            max_legs=self.max_legs,
+            max_iter_first=self.max_iter_first,
+            max_iter=self.max_iter,
+            max_solutions=self.max_solutions,
+            alpha=None if self.alpha == 0.0 else self.alpha,
+            seed=self.seed,
+        )
+
+        observable_decoder = relay_bp.ObservableDecoderRunner(
+            decoder,
+            check_matrices.observables_matrix,
+            include_decode_result=False,
+        )
+        return observable_decoder
+
+
 class SinterDecoder_LRBP(SinterDecoder_BaseBP):
     def __init__(
         self,

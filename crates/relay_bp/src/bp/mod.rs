@@ -17,3 +17,4 @@ pub mod slg_mbp;
 pub mod disordered_bp;
 pub mod dual_relay;
 pub mod lbf;
+pub mod clip_bp;

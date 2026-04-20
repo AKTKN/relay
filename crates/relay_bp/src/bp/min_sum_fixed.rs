@@ -88,6 +88,14 @@ impl MinSumBPDecoderFixed {
 }
 
 impl Decoder for MinSumBPDecoderFixed {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn check_matrix(&self) -> Arc<SparseBitMatrix> {
         self.decoder.check_matrix()
     }

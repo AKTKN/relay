@@ -22,6 +22,8 @@ pub type SparseBitMatrix = SparseBipartiteGraph<Bit>;
 
 use dyn_clone::DynClone;
 
+use std::any::Any;
+
 use std::sync::Arc;
 use crate::bp::slg_mbp::trace::{SLGMBPDetailedDynamicsTrace, SLGMBPScoreSpikeTrace};
 
@@ -43,6 +45,9 @@ impl Mod2Mul<&Array1<Bit>> for SparseBitMatrix {
 }
 
 pub trait Decoder: DynClone + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
     fn check_matrix(&self) -> Arc<SparseBitMatrix>;
     fn log_prior_ratios(&mut self) -> Array1<f64>;
     /// Decode a single input problem
